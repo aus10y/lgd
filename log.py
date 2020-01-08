@@ -1,10 +1,12 @@
 import argparse, sys, sqlite3, tempfile, os
 
+from difflib import ndiff
 from pathlib import Path
 from subprocess import call
 
 
 EDITOR = os.environ.get('EDITOR','vim') #that easy!
+
 
 # Argparse stuff
 parser = argparse.ArgumentParser(
@@ -71,6 +73,7 @@ def get_connection():
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
+
 def db_setup(conn):
     c = conn.cursor()
 
@@ -101,7 +104,7 @@ def insert_msg(conn, msg):
 
 SELECT_ALL = "SELECT * from logs;"
 SELECT_WHERE_TAGS_TEMPL = """
-SELECT *
+SELECT logs.*
 FROM logs
 INNER JOIN logs_tags on logs_tags.log = logs.id
 INNER JOIN tags on logs_tags.tag = tags.id
@@ -116,6 +119,7 @@ INNER JOIN logs on logs_tags.log = logs.id
 WHERE 1
 """
 
+"""
 def show_msgs(conn, tags):
     # TODO: Finalize use of tags here
     # TODO: clean up
@@ -134,7 +138,113 @@ def show_msgs(conn, tags):
         msg = row[2]
         lines.extend(msg.splitlines(keepends=True))
 
-    return open_temp_logfile(lines=lines) 
+    return open_temp_logfile(lines=lines)
+"""
+
+
+def messages_with_tags(conn, tags):
+    # TODO: Finalize use of tags here
+    # TODO: clean up
+    # TODO: Have a class represent the synthetic message and ultimate diff?
+    c = conn.cursor()
+
+    if tags:
+        select = SELECT_WHERE_TAGS_TEMPL.format(
+            tags=', '.join('?' for tag in tags[0])
+        )
+        result = c.execute(select, tuple(tags[0]))
+    else:
+        result = c.execute(SELECT_ALL)
+
+    return result
+
+class RenderedLog:
+
+    def __init__(self, logs):
+        """
+        messages: a list/tuple, of 2-tuples (id, message)
+        """
+        self.logs = list(logs)
+        self._lines = None
+        self._line_map = {}
+
+        self._render()
+
+    def _render(self):
+        self._lines = []
+        first = True
+        linenum_curr = 1
+        for msg_id, _, msg in self.logs:
+            if first:
+                first = False
+            else:
+                self._lines.extend(('\n', '---\n', '\n'))
+                linenum_curr += 3
+
+            msg_lines = msg.splitlines(keepends=True)
+            self._lines.extend(msg_lines)
+
+            # TODO: this is an inefficient way to achieve this mapping
+            for i in range(len(msg_lines)):
+                linenum_curr += i
+                self._line_map[linenum_curr] = msg_id
+
+    @property
+    def rendered(self):
+        return self._lines
+
+    def diff_rendered(self, other):
+        """
+        return an iterable of LogDiffs
+        """
+        i = 0  # represents the line num from the original
+        for line in ndiff(self._lines, list(other)):
+            if not line.startswith('+ '):
+                i += 1
+            print(f"{i:3>}: {line}", end='')
+
+            # TODO: Turn the rendered line num into an absolute line num for
+            #       each log message.
+            pass
+
+
+class LogDiff:
+
+    def __init__(self, msg_id, msg, mods):
+        """
+        mods: iterable of (change, line_num, text)
+        """
+        self.id = msg_id
+        self.msg = msg
+
+        # `mods` should be an iterable of:
+        # (line_num, change, text) tuples
+        self.mods = mods
+
+    def save(self, conn, commit=True):
+        if not self._update_msg(conn):
+            # TODO: Maybe throw a custom exception?
+            return False
+
+        if not self._update_diffs(conn):
+            # TODO: Rollback? Throw exception?
+            return False
+
+        # Allow commit to be defered
+        if commit:
+            conn.commit()
+
+        return
+
+    def _update_msg(self, conn):
+        update = "UPDATE logs SET msg = ? WHERE id = ?"
+        c = conn.cursor()
+        c.execute(update, (self.msg, self.id))
+        return c.rowcount == 1
+
+    def _update_diffs(self, conn):
+        # TODO: Save diff info
+        return True
 
 
 def select_tag(conn, tag: str):
@@ -161,6 +271,7 @@ def insert_tags(conn, tags):
     conn.commit()
     return tag_ids
 
+
 INSERT_LOG_TAG_ASSC = """
 INSERT INTO logs_tags (log, tag) VALUES (?, ?);
 """
@@ -180,42 +291,31 @@ def open_temp_logfile(lines=None):
 
         call([EDITOR, tf.name])
 
-        # do the parsing with `tf` using regular File operations.
-        # for instance:
         tf.seek(0)
         return (l.decode('utf8') for l in tf.readlines())
 
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    print(f"tags: {args.tags}")
 
     dir_setup()
     conn = get_connection()
     db_setup(conn)
-    print('foo')
 
     # Display messages
     if args.show:
-        show_msgs(conn, args.tags)
+        #show_msgs(conn, args.tags)
+        messages = messages_with_tags(conn, args.tags)
+        message_view = RenderedLog(messages)
+        edited = open_temp_logfile(message_view.rendered)
+        message_view.diff_rendered(edited)
         sys.exit()
 
     # Store message
-    """
-    with tempfile.NamedTemporaryFile(suffix=".tmp") as tf:
-        #tf.write(initial_message.encode('utf8'))
-        #tf.flush()
-        call([EDITOR, tf.name])
-
-        # do the parsing with `tf` using regular File operations.
-        # for instance:
-        tf.seek(0)
-        edited_message = tf.read()
-    """
     msg_lines = open_temp_logfile()
     msg = '\n'.join(msg_lines)
 
-    msg_id = insert_msg(conn, msg.decode('utf8'))
+    msg_id = insert_msg(conn, msg)
 
     tags = input("Add tags? (comma separated): ")
     if tags:
