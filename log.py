@@ -1,6 +1,12 @@
-import argparse, sys, sqlite3, tempfile, os
+#!/usr/bin/env python3
+import argparse
+import cmd
+import difflib
+import sys
+import sqlite3
+import tempfile
+import os
 
-from difflib import ndiff
 from pathlib import Path
 from subprocess import call
 
@@ -25,6 +31,52 @@ parser.add_argument(
     help="Specify an output file, or leave blank to output to stdio."
 )
 # TODO: Implement the output file redirection.
+
+
+class TagPrompt(cmd.Cmd):
+
+    intro = 'Enter comma separated tags:\n'
+    prompt = '(tags) '
+
+    def __init__(self, *arg, **kwargs):
+        super().__init__(*arg, **kwargs)
+        self._personal_tags = None
+        self._final_tags = None
+
+    @staticmethod
+    def _tag_split(line):
+        # Use a set in order to de-duplicate tags, then convert back to list.
+        return list({tag.strip() for tag in line.split(',')})
+
+    def default(self, line):
+        self._final_tags = self._tag_split(line)
+
+    def postcmd(self, stop, line):
+        return True
+
+    def completedefault(self, text, line, begidx, endidx):
+        tag = self._tag_split(text)[-1]
+        if tag:
+            return [t for t in self._personal_tags if t.startswith(tag)]
+        else:
+            return []
+
+    def completenames(self, text, *ignored):
+        # Complete the last tag on the line
+        tag = self._tag_split(text)[-1]
+        if tag:
+            return [t for t in self._personal_tags if t.startswith(tag)]
+        else:
+            return self._personal_tags
+
+    def populate_tags(self, conn):
+        c = conn.cursor()
+        c.execute("SELECT tags.tag FROM tags;")
+        self._personal_tags = [r[0] for r in c.fetchall()]
+
+    @property
+    def user_tags(self):
+        return self._final_tags
 
 
 LGD_PATH = Path.home() / Path('.lgd')
@@ -119,28 +171,6 @@ INNER JOIN logs on logs_tags.log = logs.id
 WHERE 1
 """
 
-"""
-def show_msgs(conn, tags):
-    # TODO: Finalize use of tags here
-    # TODO: clean up
-    # TODO: Have a class represent the synthetic message and ultimate diff?
-    c = conn.cursor()
-    if tags:
-        select = SELECT_WHERE_TAGS_TEMPL.format(
-            tags=', '.join('?' for tag in tags[0])
-        )
-        result = c.execute(select, tuple(tags[0]))
-    else:
-        result = c.execute(SELECT_ALL)
-
-    lines = []
-    for row in result:
-        msg = row[2]
-        lines.extend(msg.splitlines(keepends=True))
-
-    return open_temp_logfile(lines=lines)
-"""
-
 
 def messages_with_tags(conn, tags):
     # TODO: Finalize use of tags here
@@ -158,6 +188,7 @@ def messages_with_tags(conn, tags):
 
     return result
 
+
 class RenderedLog:
 
     def __init__(self, logs):
@@ -165,64 +196,111 @@ class RenderedLog:
         messages: a list/tuple, of 2-tuples (id, message)
         """
         self.logs = list(logs)
-        self._lines = None
-        self._line_map = {}
+        self._lines = []
+        self._line_map = []
 
         self._render()
 
     def _render(self):
-        self._lines = []
         first = True
-        linenum_curr = 1
+        linenum_init = None
+        linenum_last = None
         for msg_id, _, msg in self.logs:
             if first:
                 first = False
             else:
                 self._lines.extend(('\n', '---\n', '\n'))
-                linenum_curr += 3
+                linenum_init += 3
+
+            linenum_init = len(self._lines) + 1
 
             msg_lines = msg.splitlines(keepends=True)
-            self._lines.extend(msg_lines)
+            assert len(msg_lines) > 0, "Message must have >= 1 line!"
 
-            # TODO: this is an inefficient way to achieve this mapping
-            for i in range(len(msg_lines)):
-                linenum_curr += i
-                self._line_map[linenum_curr] = msg_id
+            self._lines.extend(msg_lines)
+            linenum_last = len(self._lines)
+            self._line_map.append((msg_id, linenum_init, linenum_last))
 
     @property
     def rendered(self):
         return self._lines
 
-    def diff_rendered(self, other):
+    def diff(self, other):
         """
         return an iterable of LogDiffs
         """
-        i = 0  # represents the line num from the original
-        for line in ndiff(self._lines, list(other)):
-            if not line.startswith('+ '):
-                i += 1
-            print(f"{i:3>}: {line}", end='')
+        linenum = 0
+        msg_diff_lines = []
+        msg_map_idx = 0
+        msg_id, line_init, line_last = self._line_map[msg_map_idx]
+        log_diffs = []
 
-            # TODO: Turn the rendered line num into an absolute line num for
-            #       each log message.
-            pass
+        for line in difflib.ndiff(self._lines, list(other)):
+            if not (line.startswith('+ ') or line.startswith('? ')):
+                linenum += 1
+
+            if linenum > line_last:
+                # Store the accumulated msg diff
+                log_diffs.append(
+                    LogDiff(
+                        msg_id,
+                        ''.join(difflib.restore(msg_diff_lines, 2)),
+                        msg_diff_lines
+                    )
+                )
+                msg_diff_lines = []
+
+                if len(self._line_map) > (msg_map_idx + 1):
+                    # Set up for the next message.
+                    msg_map_idx += 1
+                    msg_id, line_init, line_last = self._line_map[msg_map_idx]
+                else:
+                    # There are no more messages, all following lines are
+                    # assumed to be synthetic and should be skipped.
+                    pass
+
+            print(f"linenum: {linenum}, msg_id: {msg_id}, start: {line_init}, stop: {line_last}, line: {line}", end='')
+
+            if line_init <= linenum <= line_last:
+                msg_diff_lines.append(line)
+
+        # Store the accumulated msg diff
+        log_diffs.append(
+            LogDiff(
+                msg_id,
+                ''.join(difflib.restore(msg_diff_lines, 2)),
+                msg_diff_lines
+            )
+        )
+
+        return log_diffs
 
 
 class LogDiff:
 
-    def __init__(self, msg_id, msg, mods):
+    def __init__(self, msg_id, msg, diff_lines):
         """
         mods: iterable of (change, line_num, text)
         """
         self.id = msg_id
         self.msg = msg
+        self.diff = ''.join(diff_lines)
+        self.modified = any((
+            line.startswith('- ') or line.startswith('+ ')
+            for line in diff_lines
+        ))
 
-        # `mods` should be an iterable of:
-        # (line_num, change, text) tuples
-        self.mods = mods
+    def __str__(self):
+        return f"<LogDiff({self.id})>\n{self.diff}\n</LogDiff>"
 
     def save(self, conn, commit=True):
-        if not self._update_msg(conn):
+        if not self.modified:
+            return
+
+        if not self.msg:
+            # TODO: delete msg or mark as deleted
+            pass
+        elif not self._update_msg(conn):
             # TODO: Maybe throw a custom exception?
             return False
 
@@ -292,7 +370,13 @@ def open_temp_logfile(lines=None):
         call([EDITOR, tf.name])
 
         tf.seek(0)
-        return (l.decode('utf8') for l in tf.readlines())
+        return tf.read().decode('utf8')
+
+
+def all_tags(conn):
+    c = conn.cursor()
+    c.execute("SELECT tags.tag FROM tags;")
+    return [r[0] for r in c.fetchall()]
 
 
 if __name__ == '__main__':
@@ -304,21 +388,32 @@ if __name__ == '__main__':
 
     # Display messages
     if args.show:
-        #show_msgs(conn, args.tags)
         messages = messages_with_tags(conn, args.tags)
         message_view = RenderedLog(messages)
         edited = open_temp_logfile(message_view.rendered)
-        message_view.diff_rendered(edited)
+        diffs = message_view.diff(edited.splitlines(keepends=True))
+        for diff in diffs:
+            if diff.modified:
+                print(diff)
+                diff.save(conn, commit=False)
+            else:
+                print(f"msg_id: {diff.id}, no change")
+        conn.commit()
         sys.exit()
 
     # Store message
-    msg_lines = open_temp_logfile()
-    msg = '\n'.join(msg_lines)
+    msg = open_temp_logfile()
+    if not msg:
+        print("No message created...")
+        sys.exit()
 
     msg_id = insert_msg(conn, msg)
 
-    tags = input("Add tags? (comma separated): ")
-    if tags:
-        tags = {t.strip() for t in tags.split(',')}
-        tag_ids = insert_tags(conn, tags)
+    # Collect tags via custom prompt
+    tag_prompt = TagPrompt()
+    tag_prompt.populate_tags(conn)
+    tag_prompt.cmdloop()
+
+    if tag_prompt.user_tags:
+        tag_ids = insert_tags(conn, tag_prompt.user_tags)
         insert_asscs(conn, msg_id, tag_ids)
