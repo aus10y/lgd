@@ -225,7 +225,7 @@ class RenderedLog:
     def rendered(self):
         return self._lines
 
-    def diff(self, other):
+    def diff(self, other, debug=False):
         """
         return an iterable of LogDiffs
         """
@@ -236,6 +236,10 @@ class RenderedLog:
         log_diffs = []
 
         for line in difflib.ndiff(self._lines, list(other)):
+            if line.startswith('? '):
+                # These intraline differences are not needed.
+                continue
+
             if not (line.startswith('+ ') or line.startswith('? ')):
                 linenum += 1
 
@@ -259,7 +263,12 @@ class RenderedLog:
                     # assumed to be synthetic and should be skipped.
                     pass
 
-            print(f"linenum: {linenum}, msg_id: {msg_id}, start: {line_init}, stop: {line_last}, line: {line}", end='')
+            if debug:
+                print(
+                    (f"line: {linenum}, msg_id: {msg_id}, start: {line_init}"
+                     f", stop: {line_last}, line: {line}"),
+                    end=''
+                )
 
             if line_init <= linenum <= line_last:
                 msg_diff_lines.append(line)
@@ -291,7 +300,7 @@ class LogDiff:
         ))
 
     def __str__(self):
-        return f"<LogDiff({self.id})>\n{self.diff}\n</LogDiff>"
+        return f"<LogDiff({self.id})>\n{self.diff}</LogDiff>"
 
     def save(self, conn, commit=True):
         if not self.modified:
@@ -394,10 +403,9 @@ if __name__ == '__main__':
         diffs = message_view.diff(edited.splitlines(keepends=True))
         for diff in diffs:
             if diff.modified:
-                print(diff)
+                #print(diff)
                 diff.save(conn, commit=False)
-            else:
-                print(f"msg_id: {diff.id}, no change")
+                print(f"Saved changes to message ID {diff.id}")
         conn.commit()
         sys.exit()
 
@@ -417,3 +425,5 @@ if __name__ == '__main__':
     if tag_prompt.user_tags:
         tag_ids = insert_tags(conn, tag_prompt.user_tags)
         insert_asscs(conn, msg_id, tag_ids)
+
+    print(f"Saved as message ID {msg_id}")
