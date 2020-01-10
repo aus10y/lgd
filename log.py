@@ -19,12 +19,15 @@ parser = argparse.ArgumentParser(
     description="A flexible knowledge store."
 )
 parser.add_argument(
-    '-s', '--show', action='store_true',
-    help="Display logs in your editor ($EDITOR)."
-)
-parser.add_argument(
-    '-t', '--tags', action='append', nargs='+',
-    help="Tag(s) used to filter or add metadata to logs."
+    '-s', '--show', action='append', nargs='*', dest='tags',
+    help=(
+        "Show messages.\n"
+        " Filter messages by adding one or more tags separated by spaces.\n"
+        " Matching messages must contain all given tags.\n"
+        " Ex. `-s foo`, `-s foo bar`.\n"
+        " Additional flag usage will OR the tag groups together.\n"
+        " Ex. `-s foo bar -s baz`.\n"
+    )
 )
 parser.add_argument(
     '-o', '--output', action="store", type=str,
@@ -35,7 +38,7 @@ parser.add_argument(
 
 class TagPrompt(cmd.Cmd):
 
-    intro = 'Enter comma separated tags:\n'
+    intro = 'Enter comma separated tags:'
     prompt = '(tags) '
 
     def __init__(self, *arg, **kwargs):
@@ -46,7 +49,9 @@ class TagPrompt(cmd.Cmd):
     @staticmethod
     def _tag_split(line):
         # Use a set in order to de-duplicate tags, then convert back to list.
-        return list({tag.strip() for tag in line.split(',')})
+        tags = (tag.strip() for tag in line.split(','))
+        tags = {t for t in tags if t}
+        return list(tags)
 
     def default(self, line):
         self._final_tags = self._tag_split(line)
@@ -59,7 +64,7 @@ class TagPrompt(cmd.Cmd):
         if tag:
             return [t for t in self._personal_tags if t.startswith(tag)]
         else:
-            return []
+            return self._personal_tags
 
     def completenames(self, text, *ignored):
         # Complete the last tag on the line
@@ -108,8 +113,8 @@ CREATE TABLE IF NOT EXISTS logs_tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     log INTEGER NOT NULL,
     tag INTEGER NOT NULL,
-    FOREIGN KEY (log) REFERENCES logs(id),
-    FOREIGN KEY (tag) REFERENCES tags(id)
+    FOREIGN KEY (log) REFERENCES logs(id) ON DELETE CASCADE,
+    FOREIGN KEY (tag) REFERENCES tags(id) ON DELETE CASCADE
 );
 """
 CREATE_ASSC_LOGS_INDEX = """
@@ -155,7 +160,7 @@ def insert_msg(conn, msg):
 
 
 SELECT_ALL = "SELECT * from logs;"
-SELECT_WHERE_TAGS_TEMPL = """
+_SELECT_WHERE_TAGS_TEMPL = """
 SELECT logs.*
 FROM logs
 INNER JOIN logs_tags on logs_tags.log = logs.id
@@ -163,45 +168,128 @@ INNER JOIN tags on logs_tags.tag = tags.id
 WHERE tags.tag in ({tags});
 """
 
-_ = """
+SELECT_WHERE_TAGS_TEMPL = """
 SELECT *
-FROM tags
-INNER JOIN logs_tags on logs_tags.tag = tags.id
-INNER JOIN logs on logs_tags.log = logs.id
-WHERE 1
+FROM logs
+WHERE logs.id in (
+    SELECT log
+    FROM logs_tags
+    WHERE tag in (
+        SELECT id
+        FROM tags
+        WHERE tag in ({tags})
+    )
+    GROUP BY log
+    HAVING COUNT(tag) >= ?
+);
 """
 
 
-def messages_with_tags(conn, tags):
-    # TODO: Finalize use of tags here
-    # TODO: clean up
-    # TODO: Have a class represent the synthetic message and ultimate diff?
+def messages_with_tags(conn, tag_groups):
+    if not tag_groups or ((len(tag_groups) == 1) and not tag_groups[0]):
+        return list(conn.execute(SELECT_ALL))
+
+    ids_seen = set()
+    messages = []
+    for tags in tag_groups:
+        select = SELECT_WHERE_TAGS_TEMPL.format(
+            tags=', '.join('?' for _ in tags)
+        )
+
+        # TODO: Achieve the following in the DB via a UNION.
+        for row in conn.execute(select, (*tags, len(tags))):
+            msg_id = row[0]
+            if msg_id not in ids_seen:
+                ids_seen.add(msg_id)
+                messages.append(row)
+
+    # TODO: Consider sorting messages?
+
+    return messages
+
+
+def delete_msg(conn, msg_id, propagate=True, commit=True):
+    """Delete the message with the given ID.
+
+    propagate: If `True` (default), delete the associates to tags,
+        but not the tags themselves.
+    commit: If `True`, persist the changes to the DB.
+    """
+    c = conn.cursor()
+    msg_id = int(msg_id)
+
+    # Delete the log message.
+    msg_delete = "DELETE FROM logs WHERE id = ?;"
+    c.execute(msg_delete, (msg_id,))
+    if c.rowcount != 1:
+        return False
+
+    # Delete the log <-> tag associations.
+    assoc_delete = "DELETE FROM logs_tags WHERE log = ?;"
+    c.execute(assoc_delete, (msg_id,))
+
+    if commit:
+        conn.commit()
+
+    return True
+
+
+def delete_tag(conn, tag, propagate=True, commit=True):
+    """Delete the tag with the given value.
+
+    propagate: If `True` (default), delete the associates to logs,
+        but not the logs themselves.
+    commit: If `True`, persist the changes to the DB.
+    """
     c = conn.cursor()
 
-    if tags:
-        select = SELECT_WHERE_TAGS_TEMPL.format(
-            tags=', '.join('?' for tag in tags[0])
-        )
-        result = c.execute(select, tuple(tags[0]))
-    else:
-        result = c.execute(SELECT_ALL)
+    # Find the id of the tag.
+    tag_select = "SELECT id FROM tags WHERE tag = ?;"
+    c.execute(tag_select, (tag,))
+    result = c.fetchone()
+    if not result:
+        return False
+    tag_id = result[0]
 
-    return result
+    # Delete the tag.
+    tag_delete = "DELETE FROM tags WHERE id = ?;"
+    c.execute(tag_delete, (tag_id,))
+    if c.rowcount != 1:
+        return False
+
+    # Delete the log <-> tag associations.
+    assoc_delete = "DELETE FROM logs_tags WHERE tag = ?;"
+    c.execute(assoc_delete, (tag_id,))
+
+    if commit:
+        conn.commit()
+
+    return True
 
 
 class RenderedLog:
 
-    def __init__(self, logs):
+    def __init__(self, logs, tags):
         """
-        messages: a list/tuple, of 2-tuples (id, message)
+        logs: A list/tuple, of 2-tuples (id, message)
+        tags: The tags used to find the given logs. A list of lists of tags.
         """
         self.logs = list(logs)
+        self.tags = list(tags) if tags else tuple()
         self._lines = []
         self._line_map = []
 
         self._render()
 
     def _render(self):
+        # Header
+        if self.tags:
+            tag_groups = (', '.join(group) for group in self.tags)
+            tags_together = (' || '.join(f"<{tg}>" for tg in tag_groups))
+            header = f"# TAGS: {tags_together}\n"
+            self._lines.extend((header, '\n'))
+
+        # Body
         first = True
         linenum_init = None
         linenum_last = None
@@ -210,7 +298,6 @@ class RenderedLog:
                 first = False
             else:
                 self._lines.extend(('\n', '---\n', '\n'))
-                linenum_init += 3
 
             linenum_init = len(self._lines) + 1
 
@@ -220,6 +307,9 @@ class RenderedLog:
             self._lines.extend(msg_lines)
             linenum_last = len(self._lines)
             self._line_map.append((msg_id, linenum_init, linenum_last))
+
+        # Footer
+        self._lines.append('\n')
 
     @property
     def rendered(self):
@@ -231,9 +321,10 @@ class RenderedLog:
         """
         linenum = 0
         msg_diff_lines = []
+        log_diffs = []
         msg_map_idx = 0
         msg_id, line_init, line_last = self._line_map[msg_map_idx]
-        log_diffs = []
+        new_msg = False
 
         for line in difflib.ndiff(self._lines, list(other)):
             if line.startswith('? '):
@@ -243,13 +334,14 @@ class RenderedLog:
             if not (line.startswith('+ ') or line.startswith('? ')):
                 linenum += 1
 
-            if linenum > line_last:
+            if linenum > line_last and not new_msg:
                 # Store the accumulated msg diff
                 log_diffs.append(
                     LogDiff(
                         msg_id,
                         ''.join(difflib.restore(msg_diff_lines, 2)),
-                        msg_diff_lines
+                        msg_diff_lines,
+                        tags=flatten_tag_groups(self.tags)
                     )
                 )
                 msg_diff_lines = []
@@ -259,9 +351,10 @@ class RenderedLog:
                     msg_map_idx += 1
                     msg_id, line_init, line_last = self._line_map[msg_map_idx]
                 else:
-                    # There are no more messages, all following lines are
-                    # assumed to be synthetic and should be skipped.
-                    pass
+                    # There are no existing messages. All following lines will
+                    # be added to a new message.
+                    new_msg = True
+                    msg_id = None
 
             if debug:
                 print(
@@ -270,7 +363,7 @@ class RenderedLog:
                     end=''
                 )
 
-            if line_init <= linenum <= line_last:
+            if (line_init <= linenum <= line_last) or new_msg:
                 msg_diff_lines.append(line)
 
         # Store the accumulated msg diff
@@ -278,7 +371,8 @@ class RenderedLog:
             LogDiff(
                 msg_id,
                 ''.join(difflib.restore(msg_diff_lines, 2)),
-                msg_diff_lines
+                msg_diff_lines,
+                tags=flatten_tag_groups(self.tags)
             )
         )
 
@@ -287,29 +381,51 @@ class RenderedLog:
 
 class LogDiff:
 
-    def __init__(self, msg_id, msg, diff_lines):
+    def __init__(self, msg_id, msg, diff_lines, tags=None):
         """
         mods: iterable of (change, line_num, text)
         """
-        self.id = msg_id
+        self.msg_id = msg_id
         self.msg = msg
         self.diff = ''.join(diff_lines)
         self.modified = any((
             line.startswith('- ') or line.startswith('+ ')
             for line in diff_lines
         ))
+        self.is_new = msg_id is None
+        self.tags = tags if tags else []
 
     def __str__(self):
-        return f"<LogDiff({self.id})>\n{self.diff}</LogDiff>"
+        id_str = str(self.msg_id) if not self.is_new else 'New'
+        return f"<LogDiff({id_str})>\n{self.diff}</LogDiff>"
 
-    def save(self, conn, commit=True):
+    def update_or_create(self, conn, commit=True):
+        if self.is_new:
+            return self._create(conn, commit=commit)
+        else:
+            return self._update(conn, commit=commit)
+
+    def _create(self, conn, commit=True):
+        msg_id = insert_msg(conn, self.msg)
+        self.msg_id = msg_id
+
+        tag_ids = insert_tags(conn, self.tags)
+        insert_asscs(conn, self.msg_id, tag_ids)
+
+        if commit:
+            conn.commit()
+
+        return True
+
+    def _update(self, conn, commit=True):
         if not self.modified:
-            return
+            return False
 
         if not self.msg:
-            # TODO: delete msg or mark as deleted
+            # TODO: delete msg or mark as deleted?
             pass
-        elif not self._update_msg(conn):
+
+        if not self._update_msg(conn):
             # TODO: Maybe throw a custom exception?
             return False
 
@@ -321,17 +437,24 @@ class LogDiff:
         if commit:
             conn.commit()
 
-        return
+        return True
 
     def _update_msg(self, conn):
         update = "UPDATE logs SET msg = ? WHERE id = ?"
         c = conn.cursor()
-        c.execute(update, (self.msg, self.id))
+        c.execute(update, (self.msg, self.msg_id))
         return c.rowcount == 1
 
     def _update_diffs(self, conn):
         # TODO: Save diff info
         return True
+
+
+def flatten_tag_groups(tag_groups):
+    tags = []
+    for group in tag_groups:
+        tags.extend(group)
+    return tags
 
 
 def select_tag(conn, tag: str):
@@ -371,7 +494,7 @@ def insert_asscs(conn, msg_id, tag_ids):
 
 
 def open_temp_logfile(lines=None):
-    with tempfile.NamedTemporaryFile(suffix=".tmp") as tf:
+    with tempfile.NamedTemporaryFile(suffix=".md") as tf:
         if lines:
             tf.writelines(line.encode('utf8') for line in lines)
             tf.flush()
@@ -396,16 +519,27 @@ if __name__ == '__main__':
     db_setup(conn)
 
     # Display messages
-    if args.show:
+    if args.tags:
         messages = messages_with_tags(conn, args.tags)
-        message_view = RenderedLog(messages)
+        if not messages:
+            tag_groups = (' && '.join(group) for group in args.tags)
+            all_tags = (' || '.join(f"({tg})" for tg in tag_groups))
+            print(f"No messages found for tags: {all_tags}")
+            sys.exit()
+
+        message_view = RenderedLog(messages, args.tags)
         edited = open_temp_logfile(message_view.rendered)
         diffs = message_view.diff(edited.splitlines(keepends=True))
         for diff in diffs:
             if diff.modified:
+                # TODO: Delete msg if all lines removed?
                 #print(diff)
-                diff.save(conn, commit=False)
-                print(f"Saved changes to message ID {diff.id}")
+                diff.update_or_create(conn, commit=False)
+                if diff.is_new:
+                    print(f"Saved additional message as ID {diff.msg_id}")
+                else:
+                    print(f"Saved changes to message ID {diff.msg_id}")
+
         conn.commit()
         sys.exit()
 
