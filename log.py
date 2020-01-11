@@ -55,6 +55,14 @@ DB_NAME = 'logs.db'
 DB_PATH = LGD_PATH / Path(DB_NAME)
 DB_USER_VERSION = 1
 
+# Column Names
+ID = 'id'
+LOG = 'log'
+MSG = 'msg'
+TAG = 'tag'
+TAGS = 'tags'
+CREATED_AT = 'created_at'
+
 CREATE_LOGS_TABLE = """
 CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,9 +213,8 @@ def insert_msg(conn, msg):
     return c.lastrowid
 
 
-SELECT_ALL = "SELECT * from logs;"
-SELECT_WHERE_TAGS_TEMPL = """
-SELECT *
+SELECT_LOGS_HAVING_TAGS_TEMPL = """
+SELECT logs.id
 FROM logs
 WHERE logs.id in (
     SELECT log
@@ -221,29 +228,50 @@ WHERE logs.id in (
     HAVING COUNT(tag) >= ?
 );
 """
+SELECT_LOGS_WITH_TAGS_ALL = """
+SELECT logs.*, group_concat(tags.tag) as tags
+FROM logs
+INNER JOIN logs_tags lt ON lt.log = logs.id
+INNER JOIN tags ON tags.id = lt.tag
+GROUP BY logs.id, logs.created_at, logs.msg
+ORDER BY logs.created_at;
+"""
+SELECT_LOGS_AND_TAGS_TEMPL = """
+SELECT logs.*, group_concat(tags.tag) as tags
+FROM logs
+INNER JOIN logs_tags lt ON lt.log = logs.id
+INNER JOIN tags ON tags.id = lt.tag
+WHERE logs.id in ({tags})
+GROUP BY logs.id, logs.created_at, logs.msg
+ORDER BY logs.created_at;
+"""
+
+def _msg_ids_having_tags(conn, tag_groups):
+    msg_ids = set()  # using a set in order to de-duplicate.
+
+    for tags in tag_groups:
+        select = SELECT_LOGS_HAVING_TAGS_TEMPL.format(
+            tags=', '.join('?' for _ in tags)
+        )
+
+        # TODO: Achieve the following in the DB via a UNION?
+        for row in conn.execute(select, (*tags, len(tags))):
+            msg_ids.add(row[ID])
+
+    return msg_ids
 
 
 def messages_with_tags(conn, tag_groups):
     if not tag_groups or ((len(tag_groups) == 1) and not tag_groups[0]):
-        return list(conn.execute(SELECT_ALL))
+        return list(conn.execute(SELECT_LOGS_WITH_TAGS_ALL))
 
-    ids_seen = set()
-    messages = []
-    for tags in tag_groups:
-        select = SELECT_WHERE_TAGS_TEMPL.format(
-            tags=', '.join('?' for _ in tags)
-        )
+    msg_ids = _msg_ids_having_tags(conn, tag_groups)
 
-        # TODO: Achieve the following in the DB via a UNION.
-        for row in conn.execute(select, (*tags, len(tags))):
-            msg_id = row[0]
-            if msg_id not in ids_seen:
-                ids_seen.add(msg_id)
-                messages.append(row)
+    select = SELECT_LOGS_AND_TAGS_TEMPL.format(
+        tags=', '.join('?' for _ in msg_ids)
+    )
 
-    # TODO: Consider sorting messages?
-
-    return messages
+    return list(conn.execute(select, tuple(msg_ids)).fetchall())
 
 
 def msg_exists(conn, msg_id):
@@ -324,25 +352,25 @@ class RenderedLog:
         # Body
         linenum_init = None
         linenum_last = None
-        for msg_id, _, msg in self.logs:
+        for row in self.logs:
             # Set the header for each message.
             self._lines.extend((
                 f'\n',
                 f'{79*"-"}\n',
-                f'# ID: {msg_id}\n',
-                f'# Created: 2020/01/10\n',
-                f'# Tags: {self.tags}\n',
+                f'# ID: {row[ID]}\n',
+                f'# Created: {row[CREATED_AT]}\n',
+                f'# Tags: {row[TAGS].split(",")}\n',
                 f'\n',
             ))
 
             linenum_init = len(self._lines) + 1
 
-            msg_lines = msg.splitlines(keepends=True)
+            msg_lines = row[MSG].splitlines(keepends=True)
             #assert len(msg_lines) > 0, "Message must have >= 1 line!"
 
             self._lines.extend(msg_lines)
             linenum_last = len(self._lines)
-            self._line_map.append((msg_id, linenum_init, linenum_last))
+            self._line_map.append((row[ID], linenum_init, linenum_last))
 
         # Footer
         self._lines.append('\n')
