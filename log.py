@@ -160,14 +160,6 @@ def insert_msg(conn, msg):
 
 
 SELECT_ALL = "SELECT * from logs;"
-_SELECT_WHERE_TAGS_TEMPL = """
-SELECT logs.*
-FROM logs
-INNER JOIN logs_tags on logs_tags.log = logs.id
-INNER JOIN tags on logs_tags.tag = tags.id
-WHERE tags.tag in ({tags});
-"""
-
 SELECT_WHERE_TAGS_TEMPL = """
 SELECT *
 FROM logs
@@ -225,8 +217,8 @@ def delete_msg(conn, msg_id, propagate=True, commit=True):
         return False
 
     # Delete the log <-> tag associations.
-    assoc_delete = "DELETE FROM logs_tags WHERE log = ?;"
-    c.execute(assoc_delete, (msg_id,))
+    #assoc_delete = "DELETE FROM logs_tags WHERE log = ?;"
+    #c.execute(assoc_delete, (msg_id,))
 
     if commit:
         conn.commit()
@@ -258,8 +250,8 @@ def delete_tag(conn, tag, propagate=True, commit=True):
         return False
 
     # Delete the log <-> tag associations.
-    assoc_delete = "DELETE FROM logs_tags WHERE tag = ?;"
-    c.execute(assoc_delete, (tag_id,))
+    #assoc_delete = "DELETE FROM logs_tags WHERE tag = ?;"
+    #c.execute(assoc_delete, (tag_id,))
 
     if commit:
         conn.commit()
@@ -297,7 +289,7 @@ class RenderedLog:
             if first:
                 first = False
             else:
-                self._lines.extend(('\n', '---\n', '\n'))
+                self._lines.extend(('\n', f'{79*"-"}\n', '\n'))
 
             linenum_init = len(self._lines) + 1
 
