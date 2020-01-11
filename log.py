@@ -88,6 +88,18 @@ def get_connection():
     return conn
 
 
+def get_user_version(conn):
+    c = conn.execute("PRAGMA user_version;")
+    return c.fetchone()[0]
+
+
+def set_user_version(conn, version, commit=True):
+    version = int(version)
+    conn.execute(f"PRAGMA user_version = {version};")
+    if commit:
+        conn.commit()
+
+
 def db_setup(conn):
     # Ensure logs table
     conn.execute(CREATE_LOGS_TABLE)
