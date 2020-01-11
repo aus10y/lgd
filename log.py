@@ -49,6 +49,8 @@ def dir_setup():
 
 DB_NAME = 'logs.db'
 DB_PATH = LGD_PATH / Path(DB_NAME)
+DB_USER_VERSION = 1
+
 CREATE_LOGS_TABLE = """
 CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,11 +98,11 @@ def get_user_version(conn):
 def set_user_version(conn, version, commit=True):
     version = int(version)
     conn.execute(f"PRAGMA user_version = {version};")
-    if commit:
-        conn.commit()
+    conn.commit() if commit else None
+    return version
 
 
-def db_setup(conn):
+def db_init(conn):
     # Ensure logs table
     conn.execute(CREATE_LOGS_TABLE)
 
@@ -114,6 +116,27 @@ def db_setup(conn):
     conn.execute(CREATE_ASSC_TAGS_INDEX)
 
     conn.commit()
+
+
+def db_setup(conn):
+    """Set up the database and perform necessary migrations."""
+    version = get_user_version(conn)
+    if version == DB_USER_VERSION:
+        return # the DB is up to date.
+
+    # TODO: transactions?
+    # TODO: Backup the database before migrating.
+
+    migrations = [
+        (1, db_init),
+        (2, lambda c: print('migration v1')),
+    ]
+
+    for migration_version, migration in migrations:
+        if version == migration_version:
+            migration(conn)
+            version = set_user_version(conn, version + 1)
+
 
 #-----------------------------------------------------------------------------
 
