@@ -252,10 +252,6 @@ def delete_msg(conn, msg_id, propagate=True, commit=True):
     if c.rowcount != 1:
         return False
 
-    # Delete the log <-> tag associations.
-    #assoc_delete = "DELETE FROM logs_tags WHERE log = ?;"
-    #c.execute(assoc_delete, (msg_id,))
-
     if commit:
         conn.commit()
 
@@ -283,10 +279,6 @@ def delete_tag(conn, tag, propagate=True, commit=True):
     if c.rowcount != 1:
         return False
 
-    # Delete the log <-> tag associations.
-    #assoc_delete = "DELETE FROM logs_tags WHERE tag = ?;"
-    #c.execute(assoc_delete, (tag_id,))
-
     if commit:
         conn.commit()
 
@@ -313,17 +305,21 @@ class RenderedLog:
             tag_groups = (', '.join(group) for group in self.tags)
             tags_together = (' || '.join(f"<{tg}>" for tg in tag_groups))
             header = f"# TAGS: {tags_together}\n"
-            self._lines.extend((header, '\n'))
+            self._lines.append(header)
 
         # Body
-        first = True
         linenum_init = None
         linenum_last = None
         for msg_id, _, msg in self.logs:
-            if first:
-                first = False
-            else:
-                self._lines.extend(('\n', f'{79*"-"}\n', '\n'))
+            # Set the header for each message.
+            self._lines.extend((
+                f'\n',
+                f'{79*"-"}\n',
+                f'# ID: {msg_id}\n',
+                f'# Created: 2020/01/10\n',
+                f'# Tags: {self.tags}\n',
+                f'\n',
+            ))
 
             linenum_init = len(self._lines) + 1
 
