@@ -11,7 +11,7 @@ from pathlib import Path
 from subprocess import call
 
 
-EDITOR = os.environ.get('EDITOR','vim') #that easy!
+EDITOR = os.environ.get('EDITOR','vim')
 
 
 # Argparse stuff
@@ -35,64 +35,17 @@ parser.add_argument(
 )
 # TODO: Implement the output file redirection.
 
-#-----------------------------------------------------------------------------
-# DATABASE
-
 
 #-----------------------------------------------------------------------------
-
-class TagPrompt(cmd.Cmd):
-
-    intro = 'Enter comma separated tags:'
-    prompt = '(tags) '
-
-    def __init__(self, *arg, **kwargs):
-        super().__init__(*arg, **kwargs)
-        self._personal_tags = None
-        self._final_tags = None
-
-    @staticmethod
-    def _tag_split(line):
-        # Use a set in order to de-duplicate tags, then convert back to list.
-        tags = (tag.strip() for tag in line.split(','))
-        tags = {t for t in tags if t}
-        return list(tags)
-
-    def default(self, line):
-        self._final_tags = self._tag_split(line)
-
-    def postcmd(self, stop, line):
-        return True
-
-    def completedefault(self, text, line, begidx, endidx):
-        tag = self._tag_split(text)[-1]
-        if tag:
-            return [t for t in self._personal_tags if t.startswith(tag)]
-        else:
-            return self._personal_tags
-
-    def completenames(self, text, *ignored):
-        # Complete the last tag on the line
-        tag = self._tag_split(text)[-1]
-        if tag:
-            return [t for t in self._personal_tags if t.startswith(tag)]
-        else:
-            return self._personal_tags
-
-    def populate_tags(self, conn):
-        c = conn.execute("SELECT tags.tag FROM tags;")
-        self._personal_tags = [r[0] for r in c.fetchall()]
-
-    @property
-    def user_tags(self):
-        return self._final_tags
-
+# Path
 
 LGD_PATH = Path.home() / Path('.lgd')
 def dir_setup():
     # If our dir doesn't exist, create it.
     LGD_PATH.mkdir(mode=0o770, exist_ok=True)
 
+#-----------------------------------------------------------------------------
+# Database
 
 DB_NAME = 'logs.db'
 DB_PATH = LGD_PATH / Path(DB_NAME)
@@ -149,6 +102,54 @@ def db_setup(conn):
     conn.execute(CREATE_ASSC_TAGS_INDEX)
 
     conn.commit()
+
+#-----------------------------------------------------------------------------
+
+class TagPrompt(cmd.Cmd):
+
+    intro = 'Enter comma separated tags:'
+    prompt = '(tags) '
+
+    def __init__(self, *arg, **kwargs):
+        super().__init__(*arg, **kwargs)
+        self._personal_tags = None
+        self._final_tags = None
+
+    @staticmethod
+    def _tag_split(line):
+        # Use a set in order to de-duplicate tags, then convert back to list.
+        tags = (tag.strip() for tag in line.split(','))
+        tags = {t for t in tags if t}
+        return list(tags)
+
+    def default(self, line):
+        self._final_tags = self._tag_split(line)
+
+    def postcmd(self, stop, line):
+        return True
+
+    def completedefault(self, text, line, begidx, endidx):
+        tag = self._tag_split(text)[-1]
+        if tag:
+            return [t for t in self._personal_tags if t.startswith(tag)]
+        else:
+            return self._personal_tags
+
+    def completenames(self, text, *ignored):
+        # Complete the last tag on the line
+        tag = self._tag_split(text)[-1]
+        if tag:
+            return [t for t in self._personal_tags if t.startswith(tag)]
+        else:
+            return self._personal_tags
+
+    def populate_tags(self, conn):
+        c = conn.execute("SELECT tags.tag FROM tags;")
+        self._personal_tags = [r[0] for r in c.fetchall()]
+
+    @property
+    def user_tags(self):
+        return self._final_tags
 
 
 INSERT_LOG = """
