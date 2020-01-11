@@ -1,0 +1,6 @@
+# vs-code
+*.code-workspace
+
+# python
+/__pycache__
+*.pyc
