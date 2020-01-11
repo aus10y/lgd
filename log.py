@@ -90,6 +90,7 @@ CREATE INDEX IF NOT EXISTS assc_tag_index ON logs_tags (tag);
 def get_connection():
     # This creates the sqlite db if it doesn't exist.
     conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
