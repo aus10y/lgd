@@ -33,6 +33,10 @@ parser.add_argument(
     '-o', '--output', action="store", type=str,
     help="Specify an output file, or leave blank to output to stdio."
 )
+parser.add_argument(
+    '-D', '--delete', action='store', type=int,
+    help="Delete the message with the given ID."
+)
 # TODO: Implement the output file redirection.
 
 
@@ -116,6 +120,11 @@ def db_init(conn):
     conn.execute(CREATE_ASSC_TAGS_INDEX)
 
     conn.commit()
+    print("performed initial db setup")
+
+
+def db_updated(conn):
+    print(f"DB updated")
 
 
 def db_setup(conn):
@@ -129,11 +138,10 @@ def db_setup(conn):
 
     migrations = [
         (1, db_init),
-        (2, lambda c: print('migration v1')),
     ]
 
     for migration_version, migration in migrations:
-        if version == migration_version:
+        if version < migration_version:
             migration(conn)
             version = set_user_version(conn, version + 1)
 
@@ -237,7 +245,12 @@ def messages_with_tags(conn, tag_groups):
     return messages
 
 
-def delete_msg(conn, msg_id, propagate=True, commit=True):
+def msg_exists(conn, msg_id):
+    sql = 'SELECT id from logs where id = ?;'
+    return conn.execute(sql, (msg_id,)).fetchone() is not None
+
+
+def delete_msg(conn, msg_id, commit=True):
     """Delete the message with the given ID.
 
     propagate: If `True` (default), delete the associates to tags,
@@ -258,7 +271,7 @@ def delete_msg(conn, msg_id, propagate=True, commit=True):
     return True
 
 
-def delete_tag(conn, tag, propagate=True, commit=True):
+def delete_tag(conn, tag, commit=True):
     """Delete the tag with the given value.
 
     propagate: If `True` (default), delete the associates to logs,
@@ -324,7 +337,7 @@ class RenderedLog:
             linenum_init = len(self._lines) + 1
 
             msg_lines = msg.splitlines(keepends=True)
-            assert len(msg_lines) > 0, "Message must have >= 1 line!"
+            #assert len(msg_lines) > 0, "Message must have >= 1 line!"
 
             self._lines.extend(msg_lines)
             linenum_last = len(self._lines)
@@ -534,6 +547,14 @@ if __name__ == '__main__':
     dir_setup()
     conn = get_connection()
     db_setup(conn)
+
+    if args.delete is not None:
+        if msg_exists(conn, args.delete):
+            delete_msg(conn, args.delete)
+            print(f"Deleted message ID {args.delete}")
+        else:
+            print(f"No message found with ID {args.delete}")
+        sys.exit()
 
     # Display messages
     if args.tags:
