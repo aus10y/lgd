@@ -35,6 +35,11 @@ parser.add_argument(
 )
 # TODO: Implement the output file redirection.
 
+#-----------------------------------------------------------------------------
+# DATABASE
+
+
+#-----------------------------------------------------------------------------
 
 class TagPrompt(cmd.Cmd):
 
@@ -75,8 +80,7 @@ class TagPrompt(cmd.Cmd):
             return self._personal_tags
 
     def populate_tags(self, conn):
-        c = conn.cursor()
-        c.execute("SELECT tags.tag FROM tags;")
+        c = conn.execute("SELECT tags.tag FROM tags;")
         self._personal_tags = [r[0] for r in c.fetchall()]
 
     @property
@@ -132,19 +136,17 @@ def get_connection():
 
 
 def db_setup(conn):
-    c = conn.cursor()
-
     # Ensure logs table
-    c.execute(CREATE_LOGS_TABLE)
+    conn.execute(CREATE_LOGS_TABLE)
 
     # Ensure tags table
-    c.execute(CREATE_TAGS_TABLE)
-    c.execute(CREATE_TAG_INDEX)
+    conn.execute(CREATE_TAGS_TABLE)
+    conn.execute(CREATE_TAG_INDEX)
 
     # Ensure association table
-    c.execute(CREATE_ASSOC_TABLE)
-    c.execute(CREATE_ASSC_LOGS_INDEX)
-    c.execute(CREATE_ASSC_TAGS_INDEX)
+    conn.execute(CREATE_ASSOC_TABLE)
+    conn.execute(CREATE_ASSC_LOGS_INDEX)
+    conn.execute(CREATE_ASSC_TAGS_INDEX)
 
     conn.commit()
 
@@ -153,8 +155,7 @@ INSERT_LOG = """
 INSERT into logs (created_at, msg) VALUES (CURRENT_TIMESTAMP, ?);
 """
 def insert_msg(conn, msg):
-    c = conn.cursor()
-    c.execute(INSERT_LOG, (msg,))
+    c = conn.execute(INSERT_LOG, (msg,))
     conn.commit()
     return c.lastrowid
 
@@ -207,12 +208,11 @@ def delete_msg(conn, msg_id, propagate=True, commit=True):
         but not the tags themselves.
     commit: If `True`, persist the changes to the DB.
     """
-    c = conn.cursor()
     msg_id = int(msg_id)
 
     # Delete the log message.
     msg_delete = "DELETE FROM logs WHERE id = ?;"
-    c.execute(msg_delete, (msg_id,))
+    c = conn.execute(msg_delete, (msg_id,))
     if c.rowcount != 1:
         return False
 
@@ -233,11 +233,9 @@ def delete_tag(conn, tag, propagate=True, commit=True):
         but not the logs themselves.
     commit: If `True`, persist the changes to the DB.
     """
-    c = conn.cursor()
-
     # Find the id of the tag.
     tag_select = "SELECT id FROM tags WHERE tag = ?;"
-    c.execute(tag_select, (tag,))
+    c = conn.execute(tag_select, (tag,))
     result = c.fetchone()
     if not result:
         return False
@@ -245,7 +243,7 @@ def delete_tag(conn, tag, propagate=True, commit=True):
 
     # Delete the tag.
     tag_delete = "DELETE FROM tags WHERE id = ?;"
-    c.execute(tag_delete, (tag_id,))
+    c = conn.execute(tag_delete, (tag_id,))
     if c.rowcount != 1:
         return False
 
@@ -433,8 +431,7 @@ class LogDiff:
 
     def _update_msg(self, conn):
         update = "UPDATE logs SET msg = ? WHERE id = ?"
-        c = conn.cursor()
-        c.execute(update, (self.msg, self.msg_id))
+        c = conn.execute(update, (self.msg, self.msg_id))
         return c.rowcount == 1
 
     def _update_diffs(self, conn):
@@ -450,8 +447,7 @@ def flatten_tag_groups(tag_groups):
 
 
 def select_tag(conn, tag: str):
-    c = conn.cursor()
-    c.execute("SELECT * FROM tags WHERE tag = ?", (tag,))
+    c = conn.execute("SELECT * FROM tags WHERE tag = ?", (tag,))
     return c.fetchone()
 
 
@@ -459,12 +455,11 @@ INSERT_TAG = """
 INSERT OR IGNORE INTO tags (tag) VALUES (?);
 """
 def insert_tags(conn, tags):
-    c = conn.cursor()
     tag_ids = set()
     for tag in tags:
         result = select_tag(conn, tag)
         if result is None:
-            c.execute(INSERT_TAG, (tag,))
+            c = conn.execute(INSERT_TAG, (tag,))
             tag_id = c.lastrowid
         else:
             tag_id, _ = result
@@ -478,9 +473,8 @@ INSERT_LOG_TAG_ASSC = """
 INSERT INTO logs_tags (log, tag) VALUES (?, ?);
 """
 def insert_asscs(conn, msg_id, tag_ids):
-    c = conn.cursor()
     for tag_id in tag_ids:
-        c.execute(INSERT_LOG_TAG_ASSC, (msg_id, tag_id))
+        conn.execute(INSERT_LOG_TAG_ASSC, (msg_id, tag_id))
     conn.commit()
     return
 
@@ -498,8 +492,7 @@ def open_temp_logfile(lines=None):
 
 
 def all_tags(conn):
-    c = conn.cursor()
-    c.execute("SELECT tags.tag FROM tags;")
+    c = conn.execute("SELECT tags.tag FROM tags;")
     return [r[0] for r in c.fetchall()]
 
 
