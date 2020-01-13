@@ -2,11 +2,13 @@
 import argparse
 import cmd
 import difflib
+import re
 import sys
 import sqlite3
 import tempfile
 import os
 
+from datetime import datetime, timedelta
 from pathlib import Path
 from subprocess import call
 
@@ -14,7 +16,55 @@ from subprocess import call
 EDITOR = os.environ.get('EDITOR','vim')
 
 
+#-----------------------------------------------------------------------------
 # Argparse stuff
+
+# Capture YYYY, optional separators, opt. MM, opt. separators, opt. DD
+date_regex = re.compile(
+    r"(?P<year>[\d]{4})[/\-_.]?(?P<month>[\d]{2})?[/\-_.]?(?P<day>[\d]{2})?"
+)
+
+def sql_date_format(dt):
+    return dt.strftime('%Y-%m-%d')
+
+def to_datetime_range(arg):
+    """Produce a (From, To) tuple of strings in YYYY-MM-DD format."""
+    # These dates are inteded to be used in SQL queries, where the dates are
+    # expected to be in `YYYY-MM-DD` format, and the "From" date is inclusive,
+    # and the "To" date is exclusive.
+
+    # Parse the date into separate fields.
+    match = date_regex.match(arg)
+    year, month, day = match['year'], match['month'], match['day']
+    if year is None:
+        raise Exception("Invalid date format")
+
+    year = int(year)
+    month = int(month) if month is not None else None
+    day = int(day) if day is not None else None
+
+    if day is not None and month is not None:
+        # Full YYYY-MM-DD, increment day
+        date_to = sql_date_format(
+            datetime(year, month, day) + timedelta(days=1))
+    elif day is None and month is not None:
+        # YYYY-MM, increment month
+        if month == 12:
+            date_to = sql_date_format(datetime(year + 1, 1, 1))
+        else:
+            date_to = sql_date_format(datetime(year, month + 1, 1))
+    elif day is None and month is None:
+        # YYYY, increment year
+        date_to = sql_date_format(datetime(year + 1, 1, 1))
+    else:
+        raise Exception("Invalid date format")
+
+    date_from = sql_date_format(
+        datetime(year, month or 1, day or 1))
+
+    return (date_from, date_to)
+
+
 parser = argparse.ArgumentParser(
     description="A flexible knowledge store."
 )
@@ -36,6 +86,16 @@ parser.add_argument(
 parser.add_argument(
     '-D', '--delete', action='store', type=int,
     help="Delete the message with the given ID."
+)
+parser.add_argument(
+    '-d', '--date', action='store', type=to_datetime_range, dest='date_range',
+    help=(
+        "Filter by year, month, day."
+        " Ex. `-d YYYYMMDD`. The year, month, day fields may optionally be"
+        " separated by any of the following characters: `/`, `-`, `_`, `.`."
+        " Ex. `--date YYYY/MM/DD`. The year, or year and month fields may be"
+        " given without the rest of the data. Ex. `-d YYYY.MM`, `-d YYYY`."
+    )
 )
 # TODO: Implement the output file redirection.
 
@@ -155,8 +215,6 @@ def db_setup(conn):
             version = set_user_version(conn, version + 1)
 
 
-#-----------------------------------------------------------------------------
-
 class TagPrompt(cmd.Cmd):
 
     intro = 'Enter comma separated tags:'
@@ -212,7 +270,9 @@ def insert_msg(conn, msg):
     conn.commit()
     return c.lastrowid
 
-
+AND_DATE_BETWEEN_TEMPL = """
+ AND {column} BETWEEN '{begin}' AND '{end}'
+"""
 SELECT_LOGS_HAVING_TAGS_TEMPL = """
 SELECT logs.id
 FROM logs
@@ -226,13 +286,14 @@ WHERE logs.id in (
     )
     GROUP BY log
     HAVING COUNT(tag) >= ?
-);
+){date_range};
 """
-SELECT_LOGS_WITH_TAGS_ALL = """
+SELECT_LOGS_WITH_TAGS_ALL_TEMPL = """
 SELECT logs.*, group_concat(tags.tag) as tags
 FROM logs
 INNER JOIN logs_tags lt ON lt.log = logs.id
 INNER JOIN tags ON tags.id = lt.tag
+WHERE 1{date_range}
 GROUP BY logs.id, logs.created_at, logs.msg
 ORDER BY logs.created_at;
 """
@@ -241,34 +302,52 @@ SELECT logs.*, group_concat(tags.tag) as tags
 FROM logs
 INNER JOIN logs_tags lt ON lt.log = logs.id
 INNER JOIN tags ON tags.id = lt.tag
-WHERE logs.id in ({tags})
+WHERE logs.id in ({msgs})
 GROUP BY logs.id, logs.created_at, logs.msg
 ORDER BY logs.created_at;
 """
 
-def _msg_ids_having_tags(conn, tag_groups):
+
+def _format_date_range(column, date_range):
+    if date_range:
+        return AND_DATE_BETWEEN_TEMPL.format(
+            column=column,
+            begin=date_range[0], end=date_range[1])
+    else:
+        return ''
+
+
+def format_template_tags_dates(template, tags, date_col, date_range):
+    tags = ', '.join('?' for _ in tags)
+    dates = _format_date_range(date_col, date_range)
+    return template.format(tags=tags, date_range=dates)
+
+
+def _msg_ids_having_tags(conn, tag_groups, date_range=None):
     msg_ids = set()  # using a set in order to de-duplicate.
 
     for tags in tag_groups:
-        select = SELECT_LOGS_HAVING_TAGS_TEMPL.format(
-            tags=', '.join('?' for _ in tags)
+        select = format_template_tags_dates(
+            SELECT_LOGS_HAVING_TAGS_TEMPL,
+            tags,
+            date_col='logs.created_at',
+            date_range=date_range
         )
-
-        # TODO: Achieve the following in the DB via a UNION?
         for row in conn.execute(select, (*tags, len(tags))):
             msg_ids.add(row[ID])
 
     return msg_ids
 
 
-def messages_with_tags(conn, tag_groups):
+def messages_with_tags(conn, tag_groups, date_range=None):
     if not tag_groups or ((len(tag_groups) == 1) and not tag_groups[0]):
-        return list(conn.execute(SELECT_LOGS_WITH_TAGS_ALL))
+        select = SELECT_LOGS_WITH_TAGS_ALL_TEMPL.format(
+            date_range=_format_date_range('logs.created_at', date_range))
+        return list(conn.execute(select))
 
-    msg_ids = _msg_ids_having_tags(conn, tag_groups)
-
+    msg_ids = _msg_ids_having_tags(conn, tag_groups, date_range=date_range)
     select = SELECT_LOGS_AND_TAGS_TEMPL.format(
-        tags=', '.join('?' for _ in msg_ids)
+        msgs=', '.join('?' for _ in msg_ids)
     )
 
     return list(conn.execute(select, tuple(msg_ids)).fetchall())
@@ -350,8 +429,7 @@ class RenderedLog:
             self._lines.append(header)
 
         # Body
-        linenum_init = None
-        linenum_last = None
+        linenum_init, linenum_last = None, None
         for row in self.logs:
             # Set the header for each message.
             self._lines.extend((
@@ -587,7 +665,7 @@ if __name__ == '__main__':
 
     # Display messages
     if args.tags:
-        messages = messages_with_tags(conn, args.tags)
+        messages = messages_with_tags(conn, args.tags, args.date_range)
         if not messages:
             tag_groups = (' && '.join(group) for group in args.tags)
             all_tags = (' || '.join(f"({tg})" for tg in tag_groups))
