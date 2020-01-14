@@ -289,7 +289,11 @@ WHERE logs.id in (
 ){date_range};
 """
 SELECT_LOGS_WITH_TAGS_ALL_TEMPL = """
-SELECT logs.*, group_concat(tags.tag) as tags
+SELECT
+    logs.id,
+    datetime(logs.created_at, 'localtime') as created_at,
+    logs.msg,
+    group_concat(tags.tag) as tags
 FROM logs
 INNER JOIN logs_tags lt ON lt.log = logs.id
 INNER JOIN tags ON tags.id = lt.tag
@@ -298,7 +302,11 @@ GROUP BY logs.id, logs.created_at, logs.msg
 ORDER BY logs.created_at;
 """
 SELECT_LOGS_AND_TAGS_TEMPL = """
-SELECT logs.*, group_concat(tags.tag) as tags
+SELECT
+    logs.id,
+    datetime(logs.created_at, 'localtime') as created_at,
+    logs.msg,
+    group_concat(tags.tag) as tags
 FROM logs
 INNER JOIN logs_tags lt ON lt.log = logs.id
 INNER JOIN tags ON tags.id = lt.tag
@@ -437,7 +445,7 @@ class RenderedLog:
                 f'{79*"-"}\n',
                 f'# ID: {row[ID]}\n',
                 f'# Created: {row[CREATED_AT]}\n',
-                f'# Tags: {row[TAGS].split(",")}\n',
+                f'# Tags: {row[TAGS].replace(",", ", ")}\n',
                 f'\n',
             ))
 
