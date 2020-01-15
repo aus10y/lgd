@@ -425,8 +425,7 @@ class RenderedLog:
         self.tags = list(tags) if tags else tuple()
         self._lines = []
         self._line_map = []
-
-        self._render()
+        self._render()  # Set up self._lines and self._lines_map
 
     def _render(self):
         # Header
@@ -450,11 +449,8 @@ class RenderedLog:
             ))
 
             linenum_init = len(self._lines) + 1
+            self._lines.extend(row[MSG].splitlines(keepends=True))
 
-            msg_lines = row[MSG].splitlines(keepends=True)
-            #assert len(msg_lines) > 0, "Message must have >= 1 line!"
-
-            self._lines.extend(msg_lines)
             linenum_last = len(self._lines)
             self._line_map.append((row[ID], linenum_init, linenum_last))
 
@@ -473,26 +469,34 @@ class RenderedLog:
     def _is_intraline(line):
         return line.startswith('? ')
 
+    @staticmethod
+    def _enumerate_diff(diff_lines):
+        line_num = 0
+        for line in diff_lines:
+            if RenderedLog._is_intraline(line):
+                # These intraline differences are not needed.
+                continue
+
+            if not RenderedLog._is_addition(line):
+                line_num += 1
+
+            yield (line_num, line)
+
     def diff(self, other, debug=False):
         """
         return an iterable of LogDiffs
         """
-        linenum = 0
+        line_num = 0
         msg_diff_lines = []
         log_diffs = []
         msg_map_idx = 0
         msg_id, msg_from, msg_to = self._line_map[msg_map_idx]
         new_msg = False
 
-        for line in difflib.ndiff(self._lines, list(other)):
-            if self._is_intraline(line):
-                # These intraline differences are not needed.
-                continue
+        diff = difflib.ndiff(self._lines, list(other))
 
-            if not self._is_addition(line):
-                linenum += 1
-
-            if linenum > msg_to and not new_msg:
+        for line_num, line in RenderedLog._enumerate_diff(diff):
+            if line_num > msg_to and not new_msg:
                 # Store the accumulated msg diff
                 log_diffs.append(
                     LogDiff(
@@ -515,12 +519,12 @@ class RenderedLog:
 
             if debug:
                 print(
-                    (f"line: {linenum:>4}, msg_id: {msg_id},"
+                    (f"line: {line_num:>4}, msg_id: {msg_id},"
                      f" ({msg_from:>4}, {msg_to:>4}): {line}"),
                     end=''
                 )
 
-            if ((msg_from <= linenum <= msg_to)
+            if ((msg_from <= line_num <= msg_to)
                     or (new_msg and self._is_addition(line))):
                 msg_diff_lines.append(line)
 
