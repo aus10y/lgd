@@ -28,10 +28,11 @@ def sql_date_format(dt):
     return dt.strftime('%Y-%m-%d')
 
 def to_datetime_range(arg):
-    """Produce a (From, To) tuple of strings in YYYY-MM-DD format."""
-    # These dates are inteded to be used in SQL queries, where the dates are
-    # expected to be in `YYYY-MM-DD` format, and the "From" date is inclusive,
-    # and the "To" date is exclusive.
+    """Produce a (From, To) tuple of strings in YYYY-MM-DD format.
+    These dates are inteded to be used in SQL queries, where the dates are
+    expected to be in `YYYY-MM-DD` format, the "From" date is inclusive, and
+    the "To" date is exclusive.
+    """
 
     # Parse the date into separate fields.
     match = date_regex.match(arg)
@@ -59,8 +60,7 @@ def to_datetime_range(arg):
     else:
         raise Exception("Invalid date format")
 
-    date_from = sql_date_format(
-        datetime(year, month or 1, day or 1))
+    date_from = sql_date_format(datetime(year, month or 1, day or 1))
 
     return (date_from, date_to)
 
@@ -459,11 +459,19 @@ class RenderedLog:
             self._line_map.append((row[ID], linenum_init, linenum_last))
 
         # Footer
-        self._lines.append('\n')
+        self._lines.extend(('\n', f'{79*"-"}\n', '# Enter new log message below\n', '\n'))
 
     @property
     def rendered(self):
         return self._lines
+
+    @staticmethod
+    def _is_addition(line):
+        return line.startswith('+ ')
+
+    @staticmethod
+    def _is_intraline(line):
+        return line.startswith('? ')
 
     def diff(self, other, debug=False):
         """
@@ -473,23 +481,22 @@ class RenderedLog:
         msg_diff_lines = []
         log_diffs = []
         msg_map_idx = 0
-        msg_id, line_init, line_last = self._line_map[msg_map_idx]
+        msg_id, msg_from, msg_to = self._line_map[msg_map_idx]
         new_msg = False
 
         for line in difflib.ndiff(self._lines, list(other)):
-            if line.startswith('? '):
+            if self._is_intraline(line):
                 # These intraline differences are not needed.
                 continue
 
-            if not (line.startswith('+ ') or line.startswith('? ')):
+            if not self._is_addition(line):
                 linenum += 1
 
-            if linenum > line_last and not new_msg:
+            if linenum > msg_to and not new_msg:
                 # Store the accumulated msg diff
                 log_diffs.append(
                     LogDiff(
                         msg_id,
-                        ''.join(difflib.restore(msg_diff_lines, 2)),
                         msg_diff_lines,
                         tags=flatten_tag_groups(self.tags)
                     )
@@ -499,28 +506,28 @@ class RenderedLog:
                 if len(self._line_map) > (msg_map_idx + 1):
                     # Set up for the next message.
                     msg_map_idx += 1
-                    msg_id, line_init, line_last = self._line_map[msg_map_idx]
+                    msg_id, msg_from, msg_to = self._line_map[msg_map_idx]
                 else:
-                    # There are no existing messages. All following lines will
-                    # be added to a new message.
+                    # There are no more pre-existing messages. All following
+                    # lines will be added to a new message.
                     new_msg = True
                     msg_id = None
 
             if debug:
                 print(
-                    (f"line: {linenum}, msg_id: {msg_id}, start: {line_init}"
-                     f", stop: {line_last}, line: {line}"),
+                    (f"line: {linenum:>4}, msg_id: {msg_id},"
+                     f" ({msg_from:>4}, {msg_to:>4}): {line}"),
                     end=''
                 )
 
-            if (line_init <= linenum <= line_last) or new_msg:
+            if ((msg_from <= linenum <= msg_to)
+                    or (new_msg and self._is_addition(line))):
                 msg_diff_lines.append(line)
 
         # Store the accumulated msg diff
         log_diffs.append(
             LogDiff(
                 msg_id,
-                ''.join(difflib.restore(msg_diff_lines, 2)),
                 msg_diff_lines,
                 tags=flatten_tag_groups(self.tags)
             )
@@ -531,13 +538,13 @@ class RenderedLog:
 
 class LogDiff:
 
-    def __init__(self, msg_id, msg, diff_lines, tags=None):
+    def __init__(self, msg_id, diff_lines, tags=None):
         """
         mods: iterable of (change, line_num, text)
         """
         self.msg_id = msg_id
-        self.msg = msg
-        self.diff = ''.join(diff_lines)
+        self.msg = ''.join(difflib.restore(diff_lines, 2))
+        self.diff = diff_lines
         self.modified = any((
             line.startswith('- ') or line.startswith('+ ')
             for line in diff_lines
@@ -682,7 +689,7 @@ if __name__ == '__main__':
 
         message_view = RenderedLog(messages, args.tags)
         edited = open_temp_logfile(message_view.rendered)
-        diffs = message_view.diff(edited.splitlines(keepends=True))
+        diffs = message_view.diff(edited.splitlines(keepends=True), debug=False)
         for diff in diffs:
             if diff.modified:
                 # TODO: Delete msg if all lines removed?
