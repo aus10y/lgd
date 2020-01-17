@@ -702,7 +702,7 @@ if __name__ == '__main__':
         sys.exit()
 
     # Display messages
-    if args.tags:
+    if args.tags or args.date_range:
         messages = messages_with_tags(conn, args.tags, args.date_range)
         if not messages:
             tag_groups = (' && '.join(group) for group in args.tags)
