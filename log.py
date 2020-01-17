@@ -295,8 +295,8 @@ SELECT
     logs.msg,
     group_concat(tags.tag) as tags
 FROM logs
-INNER JOIN logs_tags lt ON lt.log = logs.id
-INNER JOIN tags ON tags.id = lt.tag
+LEFT JOIN logs_tags lt ON lt.log = logs.id
+LEFT JOIN tags ON tags.id = lt.tag
 WHERE 1{date_range}
 GROUP BY logs.id, logs.created_at, logs.msg
 ORDER BY logs.created_at;
@@ -308,8 +308,8 @@ SELECT
     logs.msg,
     group_concat(tags.tag) as tags
 FROM logs
-INNER JOIN logs_tags lt ON lt.log = logs.id
-INNER JOIN tags ON tags.id = lt.tag
+LEFT JOIN logs_tags lt ON lt.log = logs.id
+LEFT JOIN tags ON tags.id = lt.tag
 WHERE logs.id in ({msgs})
 GROUP BY logs.id, logs.created_at, logs.msg
 ORDER BY logs.created_at;
@@ -422,15 +422,16 @@ class RenderedLog:
         tags: The tags used to find the given logs. A list of lists of tags.
         """
         self.logs = list(logs)
-        self.tags = list(tags) if tags else tuple()
+        self.tag_groups = list(tags) if tags else tuple()
+        self._all_tags = flatten_tag_groups(self.tag_groups)
         self._lines = []
         self._line_map = []
         self._render()  # Set up self._lines and self._lines_map
 
     def _render(self):
         # Header
-        if self.tags:
-            tag_groups = (', '.join(group) for group in self.tags)
+        if self.tag_groups:
+            tag_groups = (', '.join(group) for group in self.tag_groups)
             tags_together = (' || '.join(f"<{tg}>" for tg in tag_groups))
             header = f"# TAGS: {tags_together}\n"
             self._lines.append(header)
@@ -439,12 +440,13 @@ class RenderedLog:
         linenum_init, linenum_last = None, None
         for row in self.logs:
             # Set the header for each message.
+            tags_str = '' if row[TAGS] is None else row[TAGS].replace(',', ', ')
             self._lines.extend((
                 f'\n',
                 f'{79*"-"}\n',
                 f'# ID: {row[ID]}\n',
                 f'# Created: {row[CREATED_AT]}\n',
-                f'# Tags: {row[TAGS].replace(",", ", ")}\n',
+                f'# Tags: {tags_str}\n',
                 f'\n',
             ))
 
@@ -455,7 +457,13 @@ class RenderedLog:
             self._line_map.append((row[ID], linenum_init, linenum_last))
 
         # Footer
-        self._lines.extend(('\n', f'{79*"-"}\n', '# Enter new log message below\n', '\n'))
+        self._lines.extend((
+            '\n',
+            f'{79*"-"}\n',
+            f'# Enter new log message below\n',
+            f'# Tags: {", ".join(self._all_tags)}\n',
+            '\n',
+        ))
 
     @property
     def rendered(self):
@@ -523,23 +531,25 @@ class RenderedLog:
                         line_num, msg_id, line_from, line_to, text, debug=debug
                     )
 
-            log_diffs.append(
-                LogDiff(msg_id, msg_diff, tags=flatten_tag_groups(self.tags))
-            )
             # TODO: Refactor LogDiff so that lines are iteratively given to it.
+            log_diffs.append(LogDiff(msg_id, msg_diff, tags=self._all_tags))
             msg_diff = []
 
         # New msg
+        new_tags = []
         for line_num, text in diff[diff_index:]:
             RenderedLog._print_diff_info(
                 line_num, None, None, None, text, debug=debug
             )
-            if RenderedLog._is_addition(text):
+            if text.startswith('+ # Tags:'):
+                new_tags = [t.strip() for t in text[9:].split(',') if t.strip()]
+            elif RenderedLog._is_addition(text):
                 msg_diff.append(text)
 
+        # Create and append the new msg, if it exists
         if msg_diff:
             log_diffs.append(
-                LogDiff(None, msg_diff, tags=flatten_tag_groups(self.tags))
+                LogDiff(None, msg_diff, tags=new_tags)
             )
 
         return log_diffs
