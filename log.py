@@ -471,71 +471,76 @@ class RenderedLog:
 
     @staticmethod
     def _enumerate_diff(diff_lines):
-        line_num = 0
+        line_num = 1
         for line in diff_lines:
             if RenderedLog._is_intraline(line):
                 # These intraline differences are not needed.
                 continue
 
+            yield (line_num, line)
+
             if not RenderedLog._is_addition(line):
                 line_num += 1
 
-            yield (line_num, line)
+    @staticmethod
+    def _print_diff_info(line_num, msg_id, line_from, line_to, text, debug=False):
+        msg_id = str(msg_id)
+        line_from = str(line_from)
+        line_to = str(line_to)
+        if debug:
+            print(
+                (f"line: {line_num:>4}, msg_id: {msg_id},"
+                 f" ({line_from:>4}, {line_to:>4}): {text}"),
+                end=''
+            )
 
     def diff(self, other, debug=False):
         """
         return an iterable of LogDiffs
         """
-        line_num = 0
-        msg_diff_lines = []
-        log_diffs = []
-        msg_map_idx = 0
-        msg_id, msg_from, msg_to = self._line_map[msg_map_idx]
-        new_msg = False
+        line_num, diff_index = 0, 0
+        msg_diff, log_diffs = [], []
 
         diff = difflib.ndiff(self._lines, list(other))
+        diff = list(RenderedLog._enumerate_diff(diff))
 
-        for line_num, line in RenderedLog._enumerate_diff(diff):
-            if line_num > msg_to and not new_msg:
-                # Store the accumulated msg diff
-                log_diffs.append(
-                    LogDiff(
-                        msg_id,
-                        msg_diff_lines,
-                        tags=flatten_tag_groups(self.tags)
+        for msg_id, line_from, line_to in self._line_map:
+            while True:
+                if line_to < line_num:
+                    # Line has moved past the current 'msg'
+                    break
+
+                if line_from <= line_num <= line_to:
+                    # Line belongs to the current msg
+                    msg_diff.append(text)
+
+                if diff_index < len(diff):
+                    # Line is below the current msg
+                    line_num, text = diff[diff_index]
+                    diff_index += 1
+
+                    RenderedLog._print_diff_info(
+                        line_num, msg_id, line_from, line_to, text, debug=debug
                     )
-                )
-                msg_diff_lines = []
 
-                if len(self._line_map) > (msg_map_idx + 1):
-                    # Set up for the next message.
-                    msg_map_idx += 1
-                    msg_id, msg_from, msg_to = self._line_map[msg_map_idx]
-                else:
-                    # There are no more pre-existing messages. All following
-                    # lines will be added to a new message.
-                    new_msg = True
-                    msg_id = None
-
-            if debug:
-                print(
-                    (f"line: {line_num:>4}, msg_id: {msg_id},"
-                     f" ({msg_from:>4}, {msg_to:>4}): {line}"),
-                    end=''
-                )
-
-            if ((msg_from <= line_num <= msg_to)
-                    or (new_msg and self._is_addition(line))):
-                msg_diff_lines.append(line)
-
-        # Store the accumulated msg diff
-        log_diffs.append(
-            LogDiff(
-                msg_id,
-                msg_diff_lines,
-                tags=flatten_tag_groups(self.tags)
+            log_diffs.append(
+                LogDiff(msg_id, msg_diff, tags=flatten_tag_groups(self.tags))
             )
-        )
+            # TODO: Refactor LogDiff so that lines are iteratively given to it.
+            msg_diff = []
+
+        # New msg
+        for line_num, text in diff[diff_index:]:
+            RenderedLog._print_diff_info(
+                line_num, None, None, None, text, debug=debug
+            )
+            if RenderedLog._is_addition(text):
+                msg_diff.append(text)
+
+        if msg_diff:
+            log_diffs.append(
+                LogDiff(None, msg_diff, tags=flatten_tag_groups(self.tags))
+            )
 
         return log_diffs
 
@@ -557,8 +562,12 @@ class LogDiff:
         self.tags = tags if tags else []
 
     def __str__(self):
+        return ''.join(self.diff)
+
+    def __repr__(self):
         id_str = str(self.msg_id) if not self.is_new else 'New'
-        return f"<LogDiff({id_str})>\n{self.diff}</LogDiff>"
+        return f"<LogDiff({id_str})>\n{str(self)}</LogDiff>"
+
 
     def update_or_create(self, conn, commit=True):
         if self.is_new:
@@ -697,7 +706,7 @@ if __name__ == '__main__':
         for diff in diffs:
             if diff.modified:
                 # TODO: Delete msg if all lines removed?
-                #print(diff)
+                #print(repr(diff))
                 diff.update_or_create(conn, commit=False)
                 if diff.is_new:
                     print(f"Saved additional message as ID {diff.msg_id}")
