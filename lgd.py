@@ -479,16 +479,16 @@ class RenderedLog:
 
     @staticmethod
     def _enumerate_diff(diff_lines):
-        line_num = 1
+        line_num = 0
         for line in diff_lines:
             if RenderedLog._is_intraline(line):
                 # These intraline differences are not needed.
                 continue
 
-            yield (line_num, line)
-
             if not RenderedLog._is_addition(line):
                 line_num += 1
+
+            yield (line_num, line)
 
     @staticmethod
     def _print_diff_info(line_num, msg_id, line_from, line_to, text, debug=False):
@@ -501,6 +501,18 @@ class RenderedLog:
                  f" ({line_from:>4}, {line_to:>4}): {text}"),
                 end=''
             )
+
+    @staticmethod
+    def _is_new_tag_line(line):
+        TAG_LINE = '+ # Tags:'
+        return line.startswith(TAG_LINE)
+
+    @staticmethod
+    def _parse_new_tags(line):
+        TAG_LINE = '+ # Tags:'
+        raw_tags = (t.strip() for t in line[len(TAG_LINE):].split(','))
+        return [t for t in raw_tags if t]
+
 
     def diff(self, other, debug=False):
         """
@@ -531,26 +543,27 @@ class RenderedLog:
                         line_num, msg_id, line_from, line_to, text, debug=debug
                     )
 
+                    if RenderedLog._is_new_tag_line(text):
+                        print(f"New tags for msg '{msg_id}', {RenderedLog._parse_new_tags(text)}")
+
             # TODO: Refactor LogDiff so that lines are iteratively given to it.
             log_diffs.append(LogDiff(msg_id, msg_diff, tags=self._all_tags))
             msg_diff = []
 
         # New msg
-        new_tags = []
+        new_tags = self._all_tags
         for line_num, text in diff[diff_index:]:
             RenderedLog._print_diff_info(
                 line_num, None, None, None, text, debug=debug
             )
-            if text.startswith('+ # Tags:'):
-                new_tags = [t.strip() for t in text[9:].split(',') if t.strip()]
+            if RenderedLog._is_new_tag_line(text):
+                new_tags = RenderedLog._parse_new_tags(text)
             elif RenderedLog._is_addition(text):
                 msg_diff.append(text)
 
         # Create and append the new msg, if it exists
         if msg_diff:
-            log_diffs.append(
-                LogDiff(None, msg_diff, tags=new_tags)
-            )
+            log_diffs.append(LogDiff(None, msg_diff, tags=new_tags))
 
         return log_diffs
 
