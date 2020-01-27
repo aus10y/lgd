@@ -267,9 +267,11 @@ class TagPrompt(cmd.Cmd):
 #------------------------------------------------------------------------------
 # DB Row Wrappers
 
-class Message:
+class DoesNotExist(Exception):
+    pass
 
-    _TABLE = "logs"
+
+class Message:
 
     def __init__(self, pk: int, created_at, msg: str, tags: list):
         self.id = pk
@@ -292,11 +294,49 @@ class Message:
     @classmethod
     def get_message(cls, conn, msg_id):
         """Retrieve a message."""
-        pass
+        sql = """
+            SELECT logs.*, GROUP_CONCAT(tags.tag) as tags
+            FROM logs
+            LEFT JOIN logs_tags lt ON lt.log = logs.id
+            LEFT JOIN tags ON tags.id = lt.tag
+            WHERE logs.id = ?
+            GROUP BY logs.id
+            ORDER BY logs.created_at ASC;
+        """
+
+        msg = conn.execute(sql, (msg_id,)).fetchone()
+        if msg is None:
+            raise DoesNotExist()
+
+        return Message(
+            msg['id'],
+            msg['created_at'],
+            msg['msg'],
+            msg['tags'].split(',') if msg['tags'] else []
+        )
 
     @classmethod
     def all_messages(cls, conn):
         """Fetcha all messages."""
+        sql = """
+            SELECT logs.*, GROUP_CONCAT(tags.tag) as tags
+            FROM logs
+            LEFT JOIN logs_tags lt ON lt.log = logs.id
+            LEFT JOIN tags ON tags.id = lt.tag
+            GROUP BY logs.id
+            ORDER BY logs.created_at ASC;
+        """
+
+        for msg in conn.execute(sql).fetchall():
+            yield Message(
+                msg['id'],
+                msg['created_at'],
+                msg['msg'],
+                msg['tags'].split(',') if msg['tags'] else []
+            )
+
+    @classmethod
+    def having_tags(cls, conn, tags, date_range=None):
         pass
 
     @classmethod
@@ -329,12 +369,23 @@ class Message:
 
         return tag_ids
 
+    @classmethod
+    def _insert_asscs(cls, conn, msg_id, tag_ids, commit=True):
+        INSERT_LOG_TAG_ASSC = """
+        INSERT INTO logs_tags (log, tag) VALUES (?, ?);
+        """
+        for tag_id in tag_ids:
+            conn.execute(INSERT_LOG_TAG_ASSC, (msg_id, tag_id))
+        if commit:
+            conn.commit()
+        return
 
     def __str__(self):
-        pass
+        return self.msg
 
     def __repr__(self):
-        pass
+        msg_abbrv = self.msg if len(self.msg) < 20 else f"{self.msg[:17]}..."
+        return f"<Message({self.id}: '{msg_abbrv}')>"
 
     def save(self, conn, commit=True):
         pass
