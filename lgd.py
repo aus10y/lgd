@@ -14,6 +14,7 @@ from subprocess import call
 
 
 EDITOR = os.environ.get('EDITOR','vim')
+DEBUG = False
 
 
 #-----------------------------------------------------------------------------
@@ -214,6 +215,8 @@ def db_setup(conn):
             migration(conn)
             version = set_user_version(conn, version + 1)
 
+#------------------------------------------------------------------------------
+# Autocompleting Tag Prompt
 
 class TagPrompt(cmd.Cmd):
 
@@ -261,6 +264,83 @@ class TagPrompt(cmd.Cmd):
     def user_tags(self):
         return self._final_tags
 
+#------------------------------------------------------------------------------
+# DB Row Wrappers
+
+class Message:
+
+    _TABLE = "logs"
+
+    def __init__(self, pk: int, created_at, msg: str, tags: list):
+        self.id = pk
+        self.created_at = created_at
+        self.msg = msg
+        self.tags = tags
+
+    @classmethod
+    def new_message(cls, conn, msg, tags, commit=True):
+        """Insert and return a Message."""
+        msg_id = cls._insert_msg(conn, msg, commit=commit)
+        tag_ids = cls._insert_tags(conn, tags, commit=commit)
+        cls._insert_asscs(conn, msg_id, tag_ids, commit=commit)
+
+        if commit:
+            conn.commit()
+
+        return cls.get_message(conn, msg_id)
+
+    @classmethod
+    def get_message(cls, conn, msg_id):
+        """Retrieve a message."""
+        pass
+
+    @classmethod
+    def all_messages(cls, conn):
+        """Fetcha all messages."""
+        pass
+
+    @classmethod
+    def _insert_msg(cls, conn, msg, commit=True):
+        INSERT_LOG = """
+        INSERT into logs (created_at, msg) VALUES (CURRENT_TIMESTAMP, ?);
+        """
+        c = conn.execute(INSERT_LOG, (msg,))
+        if commit:
+            conn.commit()
+        return c.lastrowid
+
+    @classmethod
+    def _insert_tags(cls, conn, tags, commit=True):
+        INSERT_TAG = """
+        INSERT OR IGNORE INTO tags (tag) VALUES (?);
+        """
+        tag_ids = set()
+        for tag in tags:
+            result = select_tag(conn, tag)
+            if result is None:
+                c = conn.execute(INSERT_TAG, (tag,))
+                tag_id = c.lastrowid
+            else:
+                tag_id, _ = result
+            tag_ids.add(tag_id)
+
+        if commit:
+            conn.commit()
+
+        return tag_ids
+
+
+    def __str__(self):
+        pass
+
+    def __repr__(self):
+        pass
+
+    def save(self, conn, commit=True):
+        pass
+
+
+#------------------------------------------------------------------------------
 
 INSERT_LOG = """
 INSERT into logs (created_at, msg) VALUES (CURRENT_TIMESTAMP, ?);
@@ -441,6 +521,7 @@ class RenderedLog:
         for row in self.logs:
             # Set the header for each message.
             tags_str = '' if row[TAGS] is None else row[TAGS].replace(',', ', ')
+            """
             self._lines.extend((
                 f'\n',
                 f'{79*"-"}\n',
@@ -449,11 +530,19 @@ class RenderedLog:
                 f'# Tags: {tags_str}\n',
                 f'\n',
             ))
+            """
+            self._lines.extend((
+                f'\n',
+                f'{79*"-"}\n',
+                f'# {row[CREATED_AT]}\n',
+                f'[ID: {row[ID]}]: # (Tags: {tags_str})\n',
+                f'\n',
+            ))
 
-            linenum_init = len(self._lines) + 1
+            linenum_init = len(self._lines)
             self._lines.extend(row[MSG].splitlines(keepends=True))
 
-            linenum_last = len(self._lines)
+            linenum_last = len(self._lines) + 1
             self._line_map.append((row[ID], linenum_init, linenum_last))
 
         # Footer
@@ -474,8 +563,20 @@ class RenderedLog:
         return line.startswith('+ ')
 
     @staticmethod
+    def _is_removal(line):
+        return line.startswith('- ')
+
+    @staticmethod
     def _is_intraline(line):
         return line.startswith('? ')
+
+    @staticmethod
+    def _is_emptyline(line):
+        return line == '  \n'
+
+    @staticmethod
+    def _is_modification(line):
+        return RenderedLog._is_addition(line) or RenderedLog._is_removal(line)
 
     @staticmethod
     def _enumerate_diff(diff_lines):
@@ -530,7 +631,12 @@ class RenderedLog:
                     # Line has moved past the current 'msg'
                     break
 
-                if line_from <= line_num <= line_to:
+                if line_num in (line_from, line_to) and not RenderedLog._is_emptyline(text):
+                    # Ignore the empty lines that we added, unless the user
+                    # made a change.
+                    # TODO: still not fully working when removing a real emptly line from bottom of message.
+                    msg_diff.append(text)
+                elif line_from < line_num < line_to:
                     # Line belongs to the current msg
                     msg_diff.append(text)
 
@@ -725,11 +831,13 @@ if __name__ == '__main__':
 
         message_view = RenderedLog(messages, args.tags)
         edited = open_temp_logfile(message_view.rendered)
-        diffs = message_view.diff(edited.splitlines(keepends=True), debug=False)
+        diffs = message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
         for diff in diffs:
             if diff.modified:
+                if DEBUG:
+                    print(repr(diff))
+
                 # TODO: Delete msg if all lines removed?
-                #print(repr(diff))
                 diff.update_or_create(conn, commit=False)
                 if diff.is_new:
                     print(f"Saved additional message as ID {diff.msg_id}")
