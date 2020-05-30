@@ -276,8 +276,11 @@ class Message:
     def __init__(self, pk: int, created_at, msg: str, tags: list):
         self.id = pk
         self.created_at = created_at
-        self.msg = msg
-        self.tags = tags
+        self._msg = msg
+        self._msg_new = msg
+        self._tags = set(tags)
+        self._tags_new = set(tags)
+        self._modified = False
 
     @classmethod
     def new_message(cls, conn, msg, tags, commit=True):
@@ -364,7 +367,7 @@ class Message:
                 tag_id, _ = result
             tag_ids.add(tag_id)
 
-        if commit:
+        if tag_ids and commit:
             conn.commit()
 
         return tag_ids
@@ -376,9 +379,39 @@ class Message:
         """
         for tag_id in tag_ids:
             conn.execute(INSERT_LOG_TAG_ASSC, (msg_id, tag_id))
-        if commit:
+        if tag_ids and commit:
             conn.commit()
         return
+
+    @classmethod
+    def _remove_asscs(cls, conn, msg_id, tag_ids, commit=True):
+        ids = ', '.join('?' for _ in len(tag_ids))
+        sql = f"DELETE FROM logs_tags where log = ? and tag in ({ids});"
+        conn.execute(sql, (msg_id, *tag_ids))
+
+    @classmethod
+    def _update_msg(cls, conn, msg_id, msg, commit=True):
+        update = "UPDATE logs SET msg = ? WHERE id = ?;"
+        c = conn.execute(update, (msg, msg_id))
+        return c.rowcount == 1
+
+    @property
+    def msg(self):
+        return self._msg
+
+    @msg.setter
+    def msg(self, text):
+        self._modified = True
+        self._msg = text
+
+    @property
+    def tags(self):
+        return sorted(self._tags)
+
+    @tags.setter
+    def tags(self, tags):
+        self._modified = True
+        self._tags_new = set(tags)
 
     def __str__(self):
         return self.msg
@@ -388,7 +421,24 @@ class Message:
         return f"<Message({self.id}: '{msg_abbrv}')>"
 
     def save(self, conn, commit=True):
-        pass
+        if not self._modified:
+            return
+
+        if self._tags != self._tags_new:
+            # Remove old tag associations
+            tags_to_remove = self._tags - self._tags_new
+            if tags_to_remove:
+                ids_to_remove = select_tags(conn, tags_to_remove)
+                Message._remove_asscs(conn, self.id, ids_to_remove, commit=commit)
+
+            # Insert new tag associations
+            tags_to_add = self._tags_new - self._tags
+            if tags_to_add:
+                ids_to_add = Message._insert_tags(conn, tags_to_add, commit=commit)
+                Message._insert_asscs(conn, self.id, ids_to_add, commit=commit)
+
+        if self._msg != self._msg_new:
+            pass
 
 
 #------------------------------------------------------------------------------
@@ -807,8 +857,16 @@ def flatten_tag_groups(tag_groups):
 
 
 def select_tag(conn, tag: str):
-    c = conn.execute("SELECT * FROM tags WHERE tag = ?", (tag,))
-    return c.fetchone()
+    result = select_tags(conn, [tag])
+    return result[0] if result else None
+
+
+def select_tags(conn, tags: list):
+    tag_snippet = ', '.join('?' for _ in tags)
+    sql = f"SELECT * FROM tags WHERE tag in ({tag_snippet})"
+    print(sql)
+    c = conn.execute(sql, tags)
+    return c.fetchall()
 
 
 INSERT_TAG = """
