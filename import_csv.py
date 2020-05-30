@@ -2,6 +2,7 @@
 import csv
 import sqlite3
 import sys
+import uuid
 
 from pathlib import Path
 
@@ -14,42 +15,25 @@ TAGS = 'tags'
 
 def get_connection():
     # This creates the sqlite db if it doesn't exist.
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), detect_types=sqlite3.PARSE_DECLTYPES)
+
+    # Register adapters and converters.
+    sqlite3.register_adapter(uuid.UUID, lambda u: u.bytes)
+    sqlite3.register_converter('UUID', lambda b: uuid.UUID(bytes=b))
+
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
-def get_messages_tags(con):
-    sql = """
-    SELECT
-        logs.created_at,
-        logs.msg,
-        group_concat(tags.tag) as tags
-    FROM logs
-    INNER JOIN logs_tags lt on lt.log = logs.id
-    INNER JOIN tags tags on tags.id = lt.tag
-    GROUP BY logs.id
-    ORDER BY logs.created_at;
-    """
-    return con.execute(sql)
-
-
-def row_to_dict(row):
-    return {key:row[key] for key in row.keys()}
-
-
-def dict_to_tuple(row_dict):
-    return (row_dict[CREATED_AT], row_dict[MSGS])
-
-
 INSERT_LOG = """
-INSERT into logs (created_at, msg) VALUES (?, ?);
+INSERT into logs (uuid, created_at, msg) VALUES (?, ?, ?);
 """
 def insert_msg(conn, msg, created_at):
-    c = conn.execute(INSERT_LOG, (created_at, msg))
+    msg_uuid = uuid.uuid4()
+    c = conn.execute(INSERT_LOG, (msg_uuid, created_at, msg))
     conn.commit()
-    return c.lastrowid
+    return msg_uuid
 
 
 def select_tag(conn, tag: str):
@@ -58,29 +42,29 @@ def select_tag(conn, tag: str):
 
 
 INSERT_TAG = """
-INSERT OR IGNORE INTO tags (tag) VALUES (?);
+INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
 """
 def insert_tags(conn, tags):
-    tag_ids = set()
+    tag_uuids = set()
     for tag in tags:
         result = select_tag(conn, tag)
         if result is None:
-            c = conn.execute(INSERT_TAG, (tag,))
-            tag_id = c.lastrowid
+            tag_uuid = uuid.uuid4()
+            c = conn.execute(INSERT_TAG, (tag_uuid, tag))
         else:
-            tag_id, _ = result
-        tag_ids.add(tag_id)
+            tag_uuid, _ = result
+        tag_uuids.add(tag_uuid)
 
     conn.commit()
-    return tag_ids
+    return tag_uuids
 
 
 INSERT_LOG_TAG_ASSC = """
-INSERT INTO logs_tags (log, tag) VALUES (?, ?);
+INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
 """
-def insert_asscs(conn, msg_id, tag_ids):
-    for tag_id in tag_ids:
-        conn.execute(INSERT_LOG_TAG_ASSC, (msg_id, tag_id))
+def insert_asscs(conn, msg_uuid, tag_uuids):
+    for tag_uuid in tag_uuids:
+        conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
     conn.commit()
     return
 
@@ -107,9 +91,9 @@ if __name__ == '__main__':
 
             print(f"{msg[:10]}, {created_at}, {tags}")
 
-            msg_id = insert_msg(con, msg, created_at)
-            tag_ids = insert_tags(con, tags)
-            insert_asscs(con, msg_id, tag_ids)
+            msg_uuid = insert_msg(con, msg, created_at)
+            tag_uuids = insert_tags(con, tags)
+            insert_asscs(con, msg_uuid, tag_uuids)
 
     con.commit()
 

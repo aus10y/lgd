@@ -6,6 +6,7 @@ import re
 import sys
 import sqlite3
 import tempfile
+import uuid
 import os
 
 from datetime import datetime, timedelta
@@ -117,7 +118,7 @@ DB_PATH = LGD_PATH / Path(DB_NAME)
 DB_USER_VERSION = 1
 
 # Column Names
-ID = 'id'
+ID = 'uuid'
 LOG = 'log'
 MSG = 'msg'
 TAG = 'tag'
@@ -126,14 +127,14 @@ CREATED_AT = 'created_at'
 
 CREATE_LOGS_TABLE = """
 CREATE TABLE IF NOT EXISTS logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid UUID PRIMARY KEY,
     created_at int NOT NULL,
     msg TEXT NOT NULL
 );
 """
 CREATE_TAGS_TABLE = """
 CREATE TABLE IF NOT EXISTS tags (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid UUID PRIMARY KEY,
     tag TEXT NOT NULL UNIQUE
 );
 """
@@ -143,22 +144,27 @@ CREATE INDEX IF NOT EXISTS tag_index ON tags (tag);
 CREATE_ASSOC_TABLE = """
 CREATE TABLE IF NOT EXISTS logs_tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    log INTEGER NOT NULL,
-    tag INTEGER NOT NULL,
-    FOREIGN KEY (log) REFERENCES logs(id) ON DELETE CASCADE,
-    FOREIGN KEY (tag) REFERENCES tags(id) ON DELETE CASCADE
+    log_uuid UUID NOT NULL,
+    tag_uuid UUID NOT NULL,
+    FOREIGN KEY (log_uuid) REFERENCES logs(uuid) ON DELETE CASCADE,
+    FOREIGN KEY (tag_uuid) REFERENCES tags(uuid) ON DELETE CASCADE
 );
 """
 CREATE_ASSC_LOGS_INDEX = """
-CREATE INDEX IF NOT EXISTS assc_log_index ON logs_tags (log);
+CREATE INDEX IF NOT EXISTS assc_log_index ON logs_tags (log_uuid);
 """
 CREATE_ASSC_TAGS_INDEX = """
-CREATE INDEX IF NOT EXISTS assc_tag_index ON logs_tags (tag);
+CREATE INDEX IF NOT EXISTS assc_tag_index ON logs_tags (tag_uuid);
 """
 
 def get_connection():
     # This creates the sqlite db if it doesn't exist.
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), detect_types=sqlite3.PARSE_DECLTYPES)
+
+    # Register adapters and converters.
+    sqlite3.register_adapter(uuid.UUID, lambda u: u.bytes)
+    sqlite3.register_converter('UUID', lambda b: uuid.UUID(bytes=b))
+
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
@@ -285,29 +291,29 @@ class Message:
     @classmethod
     def new_message(cls, conn, msg, tags, commit=True):
         """Insert and return a Message."""
-        msg_id = cls._insert_msg(conn, msg, commit=commit)
-        tag_ids = cls._insert_tags(conn, tags, commit=commit)
-        cls._insert_asscs(conn, msg_id, tag_ids, commit=commit)
+        msg_uuid = cls._insert_msg(conn, msg, commit=commit)
+        tag_uuids = cls._insert_tags(conn, tags, commit=commit)
+        cls._insert_asscs(conn, msg_uuid, tag_uuids, commit=commit)
 
         if commit:
             conn.commit()
 
-        return cls.get_message(conn, msg_id)
+        return cls.get_message(conn, msg_uuid)
 
     @classmethod
-    def get_message(cls, conn, msg_id):
+    def get_message(cls, conn, msg_uuid):
         """Retrieve a message."""
         sql = """
             SELECT logs.*, GROUP_CONCAT(tags.tag) as tags
             FROM logs
-            LEFT JOIN logs_tags lt ON lt.log = logs.id
-            LEFT JOIN tags ON tags.id = lt.tag
-            WHERE logs.id = ?
-            GROUP BY logs.id
+            LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
+            LEFT JOIN tags ON tags.uuid = lt.tag_uuid
+            WHERE logs.uuid = ?
+            GROUP BY logs.uuid
             ORDER BY logs.created_at ASC;
         """
 
-        msg = conn.execute(sql, (msg_id,)).fetchone()
+        msg = conn.execute(sql, (msg_uuid,)).fetchone()
         if msg is None:
             raise DoesNotExist()
 
@@ -324,9 +330,9 @@ class Message:
         sql = """
             SELECT logs.*, GROUP_CONCAT(tags.tag) as tags
             FROM logs
-            LEFT JOIN logs_tags lt ON lt.log = logs.id
-            LEFT JOIN tags ON tags.id = lt.tag
-            GROUP BY logs.id
+            LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
+            LEFT JOIN tags ON tags.uuid = lt.tag_uuid
+            GROUP BY logs.uuid
             ORDER BY logs.created_at ASC;
         """
 
@@ -345,54 +351,55 @@ class Message:
     @classmethod
     def _insert_msg(cls, conn, msg, commit=True):
         INSERT_LOG = """
-        INSERT into logs (created_at, msg) VALUES (CURRENT_TIMESTAMP, ?);
+        INSERT into logs (uuid, created_at, msg) VALUES (?, CURRENT_TIMESTAMP, ?);
         """
-        c = conn.execute(INSERT_LOG, (msg,))
+        msg_uuid = uuid.uuid4()
+        c = conn.execute(INSERT_LOG, (msg_uuid, msg,))
         if commit:
             conn.commit()
-        return c.lastrowid
+        return msg_uuid
 
     @classmethod
     def _insert_tags(cls, conn, tags, commit=True):
         INSERT_TAG = """
-        INSERT OR IGNORE INTO tags (tag) VALUES (?);
+        INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
         """
-        tag_ids = set()
+        tag_uuids = set()
         for tag in tags:
             result = select_tag(conn, tag)
             if result is None:
-                c = conn.execute(INSERT_TAG, (tag,))
-                tag_id = c.lastrowid
+                tag_uuid = uuid.uuid4()
+                c = conn.execute(INSERT_TAG, (tag_uuid, tag))
             else:
-                tag_id, _ = result
-            tag_ids.add(tag_id)
+                tag_uuid, _ = result
+            tag_uuids.add(tag_uuid)
 
-        if tag_ids and commit:
+        if tag_uuids and commit:
             conn.commit()
 
-        return tag_ids
+        return tag_uuids
 
     @classmethod
-    def _insert_asscs(cls, conn, msg_id, tag_ids, commit=True):
+    def _insert_asscs(cls, conn, msg_uuid, tag_uuids, commit=True):
         INSERT_LOG_TAG_ASSC = """
-        INSERT INTO logs_tags (log, tag) VALUES (?, ?);
+        INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
         """
-        for tag_id in tag_ids:
-            conn.execute(INSERT_LOG_TAG_ASSC, (msg_id, tag_id))
-        if tag_ids and commit:
+        for tag_uuid in tag_uuids:
+            conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
+        if tag_uuids and commit:
             conn.commit()
         return
 
     @classmethod
-    def _remove_asscs(cls, conn, msg_id, tag_ids, commit=True):
-        ids = ', '.join('?' for _ in len(tag_ids))
+    def _remove_asscs(cls, conn, msg_uuid, tag_uuids, commit=True):
+        ids = ', '.join('?' for _ in len(tag_uuids))
         sql = f"DELETE FROM logs_tags where log = ? and tag in ({ids});"
-        conn.execute(sql, (msg_id, *tag_ids))
+        conn.execute(sql, (msg_uuid, *tag_uuids))
 
     @classmethod
-    def _update_msg(cls, conn, msg_id, msg, commit=True):
+    def _update_msg(cls, conn, msg_uuid, msg, commit=True):
         update = "UPDATE logs SET msg = ? WHERE id = ?;"
-        c = conn.execute(update, (msg, msg_id))
+        c = conn.execute(update, (msg, msg_uuid))
         return c.rowcount == 1
 
     @property
@@ -444,55 +451,56 @@ class Message:
 #------------------------------------------------------------------------------
 
 INSERT_LOG = """
-INSERT into logs (created_at, msg) VALUES (CURRENT_TIMESTAMP, ?);
+INSERT into logs (uuid, created_at, msg) VALUES (?, CURRENT_TIMESTAMP, ?);
 """
 def insert_msg(conn, msg):
-    c = conn.execute(INSERT_LOG, (msg,))
+    msg_uuid = uuid.uuid4()
+    c = conn.execute(INSERT_LOG, (msg_uuid, msg,))
     conn.commit()
-    return c.lastrowid
+    return msg_uuid
 
 AND_DATE_BETWEEN_TEMPL = """
  AND {column} BETWEEN '{begin}' AND '{end}'
 """
 SELECT_LOGS_HAVING_TAGS_TEMPL = """
-SELECT logs.id
+SELECT logs.uuid
 FROM logs
-WHERE logs.id in (
-    SELECT log
+WHERE logs.uuid in (
+    SELECT log_uuid
     FROM logs_tags
-    WHERE tag in (
-        SELECT id
+    WHERE tag_uuid in (
+        SELECT uuid
         FROM tags
         WHERE tag in ({tags})
     )
-    GROUP BY log
-    HAVING COUNT(tag) >= ?
+    GROUP BY log_uuid
+    HAVING COUNT(tag_uuid) >= ?
 ){date_range};
 """
 SELECT_LOGS_WITH_TAGS_ALL_TEMPL = """
 SELECT
-    logs.id,
+    logs.uuid,
     datetime(logs.created_at, 'localtime') as created_at,
     logs.msg,
     group_concat(tags.tag) as tags
 FROM logs
-LEFT JOIN logs_tags lt ON lt.log = logs.id
-LEFT JOIN tags ON tags.id = lt.tag
+LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
+LEFT JOIN tags ON tags.uuid = lt.tag_uuid
 WHERE 1{date_range}
-GROUP BY logs.id, logs.created_at, logs.msg
+GROUP BY logs.uuid, logs.created_at, logs.msg
 ORDER BY logs.created_at;
 """
 SELECT_LOGS_AND_TAGS_TEMPL = """
 SELECT
-    logs.id,
+    logs.uuid,
     datetime(logs.created_at, 'localtime') as created_at,
     logs.msg,
     group_concat(tags.tag) as tags
 FROM logs
-LEFT JOIN logs_tags lt ON lt.log = logs.id
-LEFT JOIN tags ON tags.id = lt.tag
-WHERE logs.id in ({msgs})
-GROUP BY logs.id, logs.created_at, logs.msg
+LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
+LEFT JOIN tags ON tags.uuid = lt.tag_uuid
+WHERE logs.uuid in ({msgs})
+GROUP BY logs.uuid, logs.created_at, logs.msg
 ORDER BY logs.created_at;
 """
 
@@ -512,8 +520,8 @@ def format_template_tags_dates(template, tags, date_col, date_range):
     return template.format(tags=tags, date_range=dates)
 
 
-def _msg_ids_having_tags(conn, tag_groups, date_range=None):
-    msg_ids = set()  # using a set in order to de-duplicate.
+def _msg_uuids_having_tags(conn, tag_groups, date_range=None):
+    msg_uuids = set()  # using a set in order to de-duplicate.
 
     for tags in tag_groups:
         select = format_template_tags_dates(
@@ -523,9 +531,9 @@ def _msg_ids_having_tags(conn, tag_groups, date_range=None):
             date_range=date_range
         )
         for row in conn.execute(select, (*tags, len(tags))):
-            msg_ids.add(row[ID])
+            msg_uuids.add(row[ID])
 
-    return msg_ids
+    return msg_uuids
 
 
 def messages_with_tags(conn, tag_groups, date_range=None):
@@ -534,31 +542,31 @@ def messages_with_tags(conn, tag_groups, date_range=None):
             date_range=_format_date_range('logs.created_at', date_range))
         return list(conn.execute(select))
 
-    msg_ids = _msg_ids_having_tags(conn, tag_groups, date_range=date_range)
+    msg_uuids = _msg_uuids_having_tags(conn, tag_groups, date_range=date_range)
     select = SELECT_LOGS_AND_TAGS_TEMPL.format(
-        msgs=', '.join('?' for _ in msg_ids)
+        msgs=', '.join('?' for _ in msg_uuids)
     )
 
-    return list(conn.execute(select, tuple(msg_ids)).fetchall())
+    return list(conn.execute(select, tuple(msg_uuids)).fetchall())
 
 
-def msg_exists(conn, msg_id):
-    sql = 'SELECT id from logs where id = ?;'
-    return conn.execute(sql, (msg_id,)).fetchone() is not None
+def msg_exists(conn, msg_uuid):
+    sql = 'SELECT uuid from logs where uuid = ?;'
+    return conn.execute(sql, (msg_uuid,)).fetchone() is not None
 
 
-def delete_msg(conn, msg_id, commit=True):
+def delete_msg(conn, msg_uuid, commit=True):
     """Delete the message with the given ID.
 
     propagate: If `True` (default), delete the associates to tags,
         but not the tags themselves.
     commit: If `True`, persist the changes to the DB.
     """
-    msg_id = int(msg_id)
+    msg_uuid = int(msg_uuid)
 
     # Delete the log message.
-    msg_delete = "DELETE FROM logs WHERE id = ?;"
-    c = conn.execute(msg_delete, (msg_id,))
+    msg_delete = "DELETE FROM logs WHERE uuid = ?;"
+    c = conn.execute(msg_delete, (msg_uuid,))
     if c.rowcount != 1:
         return False
 
@@ -576,16 +584,16 @@ def delete_tag(conn, tag, commit=True):
     commit: If `True`, persist the changes to the DB.
     """
     # Find the id of the tag.
-    tag_select = "SELECT id FROM tags WHERE tag = ?;"
+    tag_select = "SELECT uuid FROM tags WHERE tag = ?;"
     c = conn.execute(tag_select, (tag,))
     result = c.fetchone()
     if not result:
         return False
-    tag_id = result[0]
+    tag_uuid = result[0]
 
     # Delete the tag.
-    tag_delete = "DELETE FROM tags WHERE id = ?;"
-    c = conn.execute(tag_delete, (tag_id,))
+    tag_delete = "DELETE FROM tags WHERE uuid = ?;"
+    c = conn.execute(tag_delete, (tag_uuid,))
     if c.rowcount != 1:
         return False
 
@@ -599,7 +607,7 @@ class RenderedLog:
 
     def __init__(self, logs, tags):
         """
-        logs: A list/tuple, of 2-tuples (id, message)
+        logs: A list/tuple, of 2-tuples (uuid, message)
         tags: The tags used to find the given logs. A list of lists of tags.
         """
         self.logs = list(logs)
@@ -693,13 +701,13 @@ class RenderedLog:
             yield (line_num, line)
 
     @staticmethod
-    def _print_diff_info(line_num, msg_id, line_from, line_to, text, debug=False):
-        msg_id = str(msg_id)
+    def _print_diff_info(line_num, msg_uuid, line_from, line_to, text, debug=False):
+        msg_uuid = str(msg_uuid)
         line_from = str(line_from)
         line_to = str(line_to)
         if debug:
             print(
-                (f"line: {line_num:>4}, msg_id: {msg_id},"
+                (f"line: {line_num:>4}, msg_uuid: {msg_uuid},"
                  f" ({line_from:>4}, {line_to:>4}): {text}"),
                 end=''
             )
@@ -726,7 +734,7 @@ class RenderedLog:
         diff = difflib.ndiff(self._lines, list(other))
         diff = list(RenderedLog._enumerate_diff(diff))
 
-        for msg_id, line_from, line_to in self._line_map:
+        for msg_uuid, line_from, line_to in self._line_map:
             while True:
                 if line_to < line_num:
                     # Line has moved past the current 'msg'
@@ -747,14 +755,14 @@ class RenderedLog:
                     diff_index += 1
 
                     RenderedLog._print_diff_info(
-                        line_num, msg_id, line_from, line_to, text, debug=debug
+                        line_num, msg_uuid, line_from, line_to, text, debug=debug
                     )
 
                     if RenderedLog._is_new_tag_line(text):
-                        print(f"New tags for msg '{msg_id}', {RenderedLog._parse_new_tags(text)}")
+                        print(f"New tags for msg '{msg_uuid}', {RenderedLog._parse_new_tags(text)}")
 
             # TODO: Refactor LogDiff so that lines are iteratively given to it.
-            log_diffs.append(LogDiff(msg_id, msg_diff, tags=self._all_tags))
+            log_diffs.append(LogDiff(msg_uuid, msg_diff, tags=self._all_tags))
             msg_diff = []
 
         # New msg
@@ -777,25 +785,25 @@ class RenderedLog:
 
 class LogDiff:
 
-    def __init__(self, msg_id, diff_lines, tags=None):
+    def __init__(self, msg_uuid, diff_lines, tags=None):
         """
         mods: iterable of (change, line_num, text)
         """
-        self.msg_id = msg_id
+        self.msg_uuid = msg_uuid
         self.msg = ''.join(difflib.restore(diff_lines, 2))
         self.diff = diff_lines
         self.modified = any((
             line.startswith('- ') or line.startswith('+ ')
             for line in diff_lines
         ))
-        self.is_new = msg_id is None
+        self.is_new = msg_uuid is None
         self.tags = tags if tags else []
 
     def __str__(self):
         return ''.join(self.diff)
 
     def __repr__(self):
-        id_str = str(self.msg_id) if not self.is_new else 'New'
+        id_str = str(self.msg_uuid) if not self.is_new else 'New'
         return f"<LogDiff({id_str})>\n{str(self)}</LogDiff>"
 
 
@@ -806,11 +814,11 @@ class LogDiff:
             return self._update(conn, commit=commit)
 
     def _create(self, conn, commit=True):
-        msg_id = insert_msg(conn, self.msg)
-        self.msg_id = msg_id
+        msg_uuid = insert_msg(conn, self.msg)
+        self.msg_uuid = msg_uuid
 
-        tag_ids = insert_tags(conn, self.tags)
-        insert_asscs(conn, self.msg_id, tag_ids)
+        tag_uuids = insert_tags(conn, self.tags)
+        insert_asscs(conn, self.msg_uuid, tag_uuids)
 
         if commit:
             conn.commit()
@@ -840,8 +848,8 @@ class LogDiff:
         return True
 
     def _update_msg(self, conn):
-        update = "UPDATE logs SET msg = ? WHERE id = ?"
-        c = conn.execute(update, (self.msg, self.msg_id))
+        update = "UPDATE logs SET msg = ? WHERE uuid = ?"
+        c = conn.execute(update, (self.msg, self.msg_uuid))
         return c.rowcount == 1
 
     def _update_diffs(self, conn):
@@ -864,35 +872,34 @@ def select_tag(conn, tag: str):
 def select_tags(conn, tags: list):
     tag_snippet = ', '.join('?' for _ in tags)
     sql = f"SELECT * FROM tags WHERE tag in ({tag_snippet})"
-    print(sql)
     c = conn.execute(sql, tags)
     return c.fetchall()
 
 
 INSERT_TAG = """
-INSERT OR IGNORE INTO tags (tag) VALUES (?);
+INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
 """
 def insert_tags(conn, tags):
-    tag_ids = set()
+    tag_uuids = set()
     for tag in tags:
         result = select_tag(conn, tag)
         if result is None:
-            c = conn.execute(INSERT_TAG, (tag,))
-            tag_id = c.lastrowid
+            tag_uuid = uuid.uuid4()
+            c = conn.execute(INSERT_TAG, (tag_uuid, tag))
         else:
-            tag_id, _ = result
-        tag_ids.add(tag_id)
+            tag_uuid, _ = result
+        tag_uuids.add(tag_uuid)
 
     conn.commit()
-    return tag_ids
+    return tag_uuids
 
 
 INSERT_LOG_TAG_ASSC = """
-INSERT INTO logs_tags (log, tag) VALUES (?, ?);
+INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
 """
-def insert_asscs(conn, msg_id, tag_ids):
-    for tag_id in tag_ids:
-        conn.execute(INSERT_LOG_TAG_ASSC, (msg_id, tag_id))
+def insert_asscs(conn, msg_uuid, tag_uuids):
+    for tag_uuid in tag_uuids:
+        conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
     conn.commit()
     return
 
@@ -949,9 +956,9 @@ if __name__ == '__main__':
                 # TODO: Delete msg if all lines removed?
                 diff.update_or_create(conn, commit=False)
                 if diff.is_new:
-                    print(f"Saved additional message as ID {diff.msg_id}")
+                    print(f"Saved additional message as ID {diff.msg_uuid}")
                 else:
-                    print(f"Saved changes to message ID {diff.msg_id}")
+                    print(f"Saved changes to message ID {diff.msg_uuid}")
 
         conn.commit()
         sys.exit()
@@ -962,7 +969,7 @@ if __name__ == '__main__':
         print("No message created...")
         sys.exit()
 
-    msg_id = insert_msg(conn, msg)
+    msg_uuid = insert_msg(conn, msg)
 
     # Collect tags via custom prompt
     tag_prompt = TagPrompt()
@@ -970,7 +977,7 @@ if __name__ == '__main__':
     tag_prompt.cmdloop()
 
     if tag_prompt.user_tags:
-        tag_ids = insert_tags(conn, tag_prompt.user_tags)
-        insert_asscs(conn, msg_id, tag_ids)
+        tag_uuids = insert_tags(conn, tag_prompt.user_tags)
+        insert_asscs(conn, msg_uuid, tag_uuids)
 
-    print(f"Saved as message ID {msg_id}")
+    print(f"Saved as message ID {msg_uuid}")
