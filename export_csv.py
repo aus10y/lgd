@@ -24,9 +24,9 @@ def get_messages_tags(con):
         logs.msg,
         group_concat(tags.tag) as tags
     FROM logs
-    INNER JOIN logs_tags lt on lt.log = logs.id
-    INNER JOIN tags tags on tags.id = lt.tag
-    GROUP BY logs.id
+    INNER JOIN logs_tags lt on lt.log_uuid = logs.uuid
+    INNER JOIN tags tags on tags.uuid = lt.tag_uuid
+    GROUP BY logs.uuid
     ORDER BY logs.created_at;
     """
     return con.execute(sql)
