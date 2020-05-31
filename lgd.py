@@ -82,7 +82,7 @@ parser.add_argument(
     )
 )
 parser.add_argument(
-    '-D', '--delete', action='store', type=int,
+    '-D', '--delete', action='store', type=str,
     help="Delete the message with the given ID."
 )
 parser.add_argument(
@@ -556,16 +556,19 @@ def msg_exists(conn, msg_uuid):
     return conn.execute(sql, (msg_uuid,)).fetchone() is not None
 
 
+def select_msgs_from_uuid_prefix(conn, uuid_prefix):
+    uuid_prefix += '%'
+    sql = "SELECT * from logs where hex(uuid) like ?;"
+    return list(conn.execute(sql, (uuid_prefix,)).fetchall())
+
+
 def delete_msg(conn, msg_uuid, commit=True):
-    """Delete the message with the given ID.
+    """Delete the message with the given UUID.
 
     propagate: If `True` (default), delete the associates to tags,
         but not the tags themselves.
     commit: If `True`, persist the changes to the DB.
     """
-    msg_uuid = int(msg_uuid)
-
-    # Delete the log message.
     msg_delete = "DELETE FROM logs WHERE uuid = ?;"
     c = conn.execute(msg_delete, (msg_uuid,))
     if c.rowcount != 1:
@@ -922,6 +925,12 @@ def all_tags(conn):
     return [r[0] for r in c.fetchall()]
 
 
+def prompt_for_delete(msg):
+    msg_fragment = msg[MSG][:46].replace('\n', '\\n')
+    prompt = f'Delete {str(msg[ID])[:8]}..., "{msg_fragment}..." (Y/n) '
+    return input(prompt).lower() == 'y'
+
+
 if __name__ == '__main__':
     args = parser.parse_args()
 
@@ -930,9 +939,21 @@ if __name__ == '__main__':
     db_setup(conn)
 
     if args.delete is not None:
-        if msg_exists(conn, args.delete):
-            delete_msg(conn, args.delete)
-            print(f"Deleted message ID {args.delete}")
+        uuid_prefix = args.delete.replace('-', '')
+        msgs = select_msgs_from_uuid_prefix(conn, uuid_prefix)
+        if msgs:
+            for msg in msgs:
+                try:
+                    confirmed = prompt_for_delete(msg)
+                except EOFError:
+                    print('')
+                    sys.exit()
+
+                if confirmed:
+                    if delete_msg(conn, msg[ID]):
+                        print(" - Deleted")
+                    else:
+                        print(" - Failed to delete")
         else:
             print(f"No message found with ID {args.delete}")
         sys.exit()
