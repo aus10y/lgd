@@ -1003,7 +1003,7 @@ if __name__ == '__main__':
                     else:
                         print(" - Failed to delete")
         else:
-            print(f"No message found with ID {args.delete}")
+            print(f"No message UUID prefixed with '{args.delete}'")
         sys.exit()
 
     # If reading from stdin
