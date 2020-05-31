@@ -272,6 +272,47 @@ class TagPrompt(cmd.Cmd):
         return self._final_tags
 
 #------------------------------------------------------------------------------
+# Terminal Color Helpers
+
+class Term:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    ERROR = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+    @classmethod
+    def header(cls, str):
+        return f"{cls.HEADER}{str}{cls.ENDC}"
+
+    @classmethod
+    def blue(cls, str):
+        return f"{cls.OKBLUE}{str}{cls.ENDC}"
+
+    @classmethod
+    def green(cls, str):
+        return f"{cls.OKGREEN}{str}{cls.ENDC}"
+
+    @classmethod
+    def warning(cls, str):
+        return f"{cls.WARNING}{str}{cls.ENDC}"
+
+    @classmethod
+    def error(cls, str):
+        return f"{cls.ERROR}{str}{cls.ENDC}"
+
+    @classmethod
+    def bold(cls, str):
+        return f"{cls.BOLD}{str}{cls.ENDC}"
+
+    @classmethod
+    def underline(cls, str):
+        return f"{cls.UNDERLINE}{str}{cls.ENDC}"
+
+#------------------------------------------------------------------------------
 # DB Row Wrappers
 
 class DoesNotExist(Exception):
