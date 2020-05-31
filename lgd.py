@@ -82,10 +82,6 @@ parser.add_argument(
     )
 )
 parser.add_argument(
-    '-o', '--output', action="store", type=str,
-    help="Specify an output file, or leave blank to output to stdio."
-)
-parser.add_argument(
     '-D', '--delete', action='store', type=int,
     help="Delete the message with the given ID."
 )
@@ -99,7 +95,12 @@ parser.add_argument(
         " given without the rest of the data. Ex. `-d YYYY.MM`, `-d YYYY`."
     )
 )
-# TODO: Implement the output file redirection.
+parser.add_argument(
+    '-', dest='dash', action='store_true', default=False,
+    help=(
+        "Take input from STDIN, echo to STDOUT."
+    )
+)
 
 
 #-----------------------------------------------------------------------------
@@ -934,6 +935,26 @@ if __name__ == '__main__':
             print(f"Deleted message ID {args.delete}")
         else:
             print(f"No message found with ID {args.delete}")
+        sys.exit()
+
+    # If reading from stdin
+    if args.dash:
+        lines = []
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            print(line, end='')
+            lines.append(line)
+
+        msg = ''.join(lines)
+        msg_uuid = insert_msg(conn, msg)
+        if args.tags:
+            tags = flatten_tag_groups(args.tags)
+            tag_uuids = insert_tags(conn, tags)
+            insert_asscs(conn, msg_uuid, tag_uuids)
+
+        print(f"Saved as message ID {msg_uuid}")
         sys.exit()
 
     # Display messages
