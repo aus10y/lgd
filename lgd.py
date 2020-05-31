@@ -285,32 +285,36 @@ class Term:
     UNDERLINE = '\033[4m'
 
     @classmethod
-    def header(cls, str):
-        return f"{cls.HEADER}{str}{cls.ENDC}"
+    def header(cls, text):
+        return f"{cls.HEADER}{text}{cls.ENDC}"
 
     @classmethod
-    def blue(cls, str):
-        return f"{cls.OKBLUE}{str}{cls.ENDC}"
+    def blue(cls, text):
+        return f"{cls.OKBLUE}{text}{cls.ENDC}"
 
     @classmethod
-    def green(cls, str):
-        return f"{cls.OKGREEN}{str}{cls.ENDC}"
+    def green(cls, text):
+        return f"{cls.OKGREEN}{text}{cls.ENDC}"
 
     @classmethod
-    def warning(cls, str):
-        return f"{cls.WARNING}{str}{cls.ENDC}"
+    def warning(cls, text):
+        return f"{cls.WARNING}{text}{cls.ENDC}"
 
     @classmethod
-    def error(cls, str):
-        return f"{cls.ERROR}{str}{cls.ENDC}"
+    def error(cls, text):
+        return f"{cls.ERROR}{text}{cls.ENDC}"
 
     @classmethod
-    def bold(cls, str):
-        return f"{cls.BOLD}{str}{cls.ENDC}"
+    def bold(cls, text):
+        return f"{cls.BOLD}{text}{cls.ENDC}"
 
     @classmethod
-    def underline(cls, str):
-        return f"{cls.UNDERLINE}{str}{cls.ENDC}"
+    def underline(cls, text):
+        return f"{cls.UNDERLINE}{text}{cls.ENDC}"
+
+    @staticmethod
+    def apply_where(color_func, sub_string, text):
+        return text.replace(sub_string, color_func(sub_string))
 
 #------------------------------------------------------------------------------
 # DB Row Wrappers
