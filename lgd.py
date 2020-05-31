@@ -113,7 +113,7 @@ def dir_setup():
     LGD_PATH.mkdir(mode=0o770, exist_ok=True)
 
 #-----------------------------------------------------------------------------
-# Database
+# Database Setup
 
 DB_NAME = 'logs.db'
 DB_PATH = LGD_PATH / Path(DB_NAME)
@@ -336,185 +336,38 @@ class Gzip(str):
     def decompress_string(msg_bytes):
         return gzip.decompress(msg_bytes).decode('utf8')
 
-#------------------------------------------------------------------------------
-# DB Row Wrappers
 
-class DoesNotExist(Exception):
-    pass
+def flatten_tag_groups(tag_groups):
+    tags = []
+    for group in tag_groups:
+        tags.extend(group)
+    return tags
 
 
-class Message:
+def prompt_for_delete(msg, uuid_prefix):
+    # TODO: Improve uuid highlighting. Currently doesn't work for whole uuids.
+    uuid_fragment = Term.apply_where(Term.green, uuid_prefix, str(msg[ID])[:8])
+    msg_fragment = msg[MSG][:46].replace('\n', '\\n')
 
-    def __init__(self, pk: int, created_at, msg: str, tags: list):
-        self.id = pk
-        self.created_at = created_at
-        self._msg = msg
-        self._msg_new = msg
-        self._tags = set(tags)
-        self._tags_new = set(tags)
-        self._modified = False
+    prompt = f'{Term.warning("Delete")} {uuid_fragment}..., "{msg_fragment}..." (Y/n) '
+    return input(prompt).lower() == 'y'
 
-    @classmethod
-    def new_message(cls, conn, msg, tags, commit=True):
-        """Insert and return a Message."""
-        msg_uuid = cls._insert_msg(conn, msg, commit=commit)
-        tag_uuids = cls._insert_tags(conn, tags, commit=commit)
-        cls._insert_asscs(conn, msg_uuid, tag_uuids, commit=commit)
 
-        if commit:
-            conn.commit()
+def open_temp_logfile(lines=None):
+    with tempfile.NamedTemporaryFile(suffix=".md") as tf:
+        if lines:
+            tf.writelines(line.encode('utf8') for line in lines)
+            tf.flush()
 
-        return cls.get_message(conn, msg_uuid)
+        call([EDITOR, tf.name])
 
-    @classmethod
-    def get_message(cls, conn, msg_uuid):
-        """Retrieve a message."""
-        sql = """
-            SELECT logs.*, GROUP_CONCAT(tags.tag) as tags
-            FROM logs
-            LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
-            LEFT JOIN tags ON tags.uuid = lt.tag_uuid
-            WHERE logs.uuid = ?
-            GROUP BY logs.uuid
-            ORDER BY logs.created_at ASC;
-        """
-
-        msg = conn.execute(sql, (msg_uuid,)).fetchone()
-        if msg is None:
-            raise DoesNotExist()
-
-        return Message(
-            msg['id'],
-            msg['created_at'],
-            msg['msg'],
-            msg['tags'].split(',') if msg['tags'] else []
-        )
-
-    @classmethod
-    def all_messages(cls, conn):
-        """Fetcha all messages."""
-        sql = """
-            SELECT logs.*, GROUP_CONCAT(tags.tag) as tags
-            FROM logs
-            LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
-            LEFT JOIN tags ON tags.uuid = lt.tag_uuid
-            GROUP BY logs.uuid
-            ORDER BY logs.created_at ASC;
-        """
-
-        for msg in conn.execute(sql).fetchall():
-            yield Message(
-                msg['id'],
-                msg['created_at'],
-                msg['msg'],
-                msg['tags'].split(',') if msg['tags'] else []
-            )
-
-    @classmethod
-    def having_tags(cls, conn, tags, date_range=None):
-        pass
-
-    @classmethod
-    def _insert_msg(cls, conn, msg, commit=True):
-        INSERT_LOG = """
-        INSERT into logs (uuid, created_at, msg) VALUES (?, CURRENT_TIMESTAMP, ?);
-        """
-        msg_uuid = uuid.uuid4()
-        c = conn.execute(INSERT_LOG, (msg_uuid, msg,))
-        if commit:
-            conn.commit()
-        return msg_uuid
-
-    @classmethod
-    def _insert_tags(cls, conn, tags, commit=True):
-        INSERT_TAG = """
-        INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
-        """
-        tag_uuids = set()
-        for tag in tags:
-            result = select_tag(conn, tag)
-            if result is None:
-                tag_uuid = uuid.uuid4()
-                c = conn.execute(INSERT_TAG, (tag_uuid, tag))
-            else:
-                tag_uuid, _ = result
-            tag_uuids.add(tag_uuid)
-
-        if tag_uuids and commit:
-            conn.commit()
-
-        return tag_uuids
-
-    @classmethod
-    def _insert_asscs(cls, conn, msg_uuid, tag_uuids, commit=True):
-        INSERT_LOG_TAG_ASSC = """
-        INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
-        """
-        for tag_uuid in tag_uuids:
-            conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
-        if tag_uuids and commit:
-            conn.commit()
-        return
-
-    @classmethod
-    def _remove_asscs(cls, conn, msg_uuid, tag_uuids, commit=True):
-        ids = ', '.join('?' for _ in len(tag_uuids))
-        sql = f"DELETE FROM logs_tags where log = ? and tag in ({ids});"
-        conn.execute(sql, (msg_uuid, *tag_uuids))
-
-    @classmethod
-    def _update_msg(cls, conn, msg_uuid, msg, commit=True):
-        update = "UPDATE logs SET msg = ? WHERE id = ?;"
-        c = conn.execute(update, (msg, msg_uuid))
-        return c.rowcount == 1
-
-    @property
-    def msg(self):
-        return self._msg
-
-    @msg.setter
-    def msg(self, text):
-        self._modified = True
-        self._msg = text
-
-    @property
-    def tags(self):
-        return sorted(self._tags)
-
-    @tags.setter
-    def tags(self, tags):
-        self._modified = True
-        self._tags_new = set(tags)
-
-    def __str__(self):
-        return self.msg
-
-    def __repr__(self):
-        msg_abbrv = self.msg if len(self.msg) < 20 else f"{self.msg[:17]}..."
-        return f"<Message({self.id}: '{msg_abbrv}')>"
-
-    def save(self, conn, commit=True):
-        if not self._modified:
-            return
-
-        if self._tags != self._tags_new:
-            # Remove old tag associations
-            tags_to_remove = self._tags - self._tags_new
-            if tags_to_remove:
-                ids_to_remove = select_tags(conn, tags_to_remove)
-                Message._remove_asscs(conn, self.id, ids_to_remove, commit=commit)
-
-            # Insert new tag associations
-            tags_to_add = self._tags_new - self._tags
-            if tags_to_add:
-                ids_to_add = Message._insert_tags(conn, tags_to_add, commit=commit)
-                Message._insert_asscs(conn, self.id, ids_to_add, commit=commit)
-
-        if self._msg != self._msg_new:
-            pass
-
+        tf.seek(0)
+        return tf.read().decode('utf8')
 
 #------------------------------------------------------------------------------
+# SQL queries and related functions
+
+## Log / Message related
 
 INSERT_LOG = """
 INSERT into logs (uuid, created_at, msg) VALUES (?, CURRENT_TIMESTAMP, ?);
@@ -644,6 +497,7 @@ def delete_msg(conn, msg_uuid, commit=True):
 
     return True
 
+## Tags
 
 def delete_tag(conn, tag, commit=True):
     """Delete the tag with the given value.
@@ -671,6 +525,54 @@ def delete_tag(conn, tag, commit=True):
 
     return True
 
+
+def select_tag(conn, tag: str):
+    result = select_tags(conn, [tag])
+    return result[0] if result else None
+
+
+def select_tags(conn, tags: list):
+    tag_snippet = ', '.join('?' for _ in tags)
+    sql = f"SELECT * FROM tags WHERE tag in ({tag_snippet})"
+    c = conn.execute(sql, tags)
+    return c.fetchall()
+
+
+INSERT_TAG = """
+INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
+"""
+def insert_tags(conn, tags):
+    tag_uuids = set()
+    for tag in tags:
+        result = select_tag(conn, tag)
+        if result is None:
+            tag_uuid = uuid.uuid4()
+            c = conn.execute(INSERT_TAG, (tag_uuid, tag))
+        else:
+            tag_uuid, _ = result
+        tag_uuids.add(tag_uuid)
+
+    conn.commit()
+    return tag_uuids
+
+
+def all_tags(conn):
+    c = conn.execute("SELECT tags.tag FROM tags;")
+    return [r[0] for r in c.fetchall()]
+
+## Log-Tag associations
+
+INSERT_LOG_TAG_ASSC = """
+INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
+"""
+def insert_asscs(conn, msg_uuid, tag_uuids):
+    for tag_uuid in tag_uuids:
+        conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
+    conn.commit()
+    return
+
+#------------------------------------------------------------------------------
+# Rendiring and Diffing logs
 
 class RenderedLog:
 
@@ -925,79 +827,7 @@ class LogDiff:
         # TODO: Save diff info
         return True
 
-
-def flatten_tag_groups(tag_groups):
-    tags = []
-    for group in tag_groups:
-        tags.extend(group)
-    return tags
-
-
-def select_tag(conn, tag: str):
-    result = select_tags(conn, [tag])
-    return result[0] if result else None
-
-
-def select_tags(conn, tags: list):
-    tag_snippet = ', '.join('?' for _ in tags)
-    sql = f"SELECT * FROM tags WHERE tag in ({tag_snippet})"
-    c = conn.execute(sql, tags)
-    return c.fetchall()
-
-
-INSERT_TAG = """
-INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
-"""
-def insert_tags(conn, tags):
-    tag_uuids = set()
-    for tag in tags:
-        result = select_tag(conn, tag)
-        if result is None:
-            tag_uuid = uuid.uuid4()
-            c = conn.execute(INSERT_TAG, (tag_uuid, tag))
-        else:
-            tag_uuid, _ = result
-        tag_uuids.add(tag_uuid)
-
-    conn.commit()
-    return tag_uuids
-
-
-INSERT_LOG_TAG_ASSC = """
-INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
-"""
-def insert_asscs(conn, msg_uuid, tag_uuids):
-    for tag_uuid in tag_uuids:
-        conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
-    conn.commit()
-    return
-
-
-def open_temp_logfile(lines=None):
-    with tempfile.NamedTemporaryFile(suffix=".md") as tf:
-        if lines:
-            tf.writelines(line.encode('utf8') for line in lines)
-            tf.flush()
-
-        call([EDITOR, tf.name])
-
-        tf.seek(0)
-        return tf.read().decode('utf8')
-
-
-def all_tags(conn):
-    c = conn.execute("SELECT tags.tag FROM tags;")
-    return [r[0] for r in c.fetchall()]
-
-
-def prompt_for_delete(msg, uuid_prefix):
-    # TODO: Improve uuid highlighting. Currently doesn't work for whole uuids.
-    uuid_fragment = Term.apply_where(Term.green, uuid_prefix, str(msg[ID])[:8])
-    msg_fragment = msg[MSG][:46].replace('\n', '\\n')
-
-    prompt = f'{Term.warning("Delete")} {uuid_fragment}..., "{msg_fragment}..." (Y/n) '
-    return input(prompt).lower() == 'y'
-
+#------------------------------------------------------------------------------
 
 if __name__ == '__main__':
     args = parser.parse_args()
