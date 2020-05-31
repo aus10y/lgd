@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import csv
+import gzip
 import sqlite3
 import sys
 import uuid
@@ -20,10 +21,27 @@ def get_connection():
     # Register adapters and converters.
     sqlite3.register_adapter(uuid.UUID, lambda u: u.bytes)
     sqlite3.register_converter('UUID', lambda b: uuid.UUID(bytes=b))
+    sqlite3.register_adapter(Gzip, lambda s: Gzip.compress_string(s))
+    sqlite3.register_converter(Gzip.COL_TYPE, lambda b: Gzip.decompress_string(b))
 
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
+
+
+class Gzip(str):
+    """This class exisits to aid sqlite adapters and converters for compressing
+    text via gzip."""
+
+    COL_TYPE = 'GZIP'
+
+    @staticmethod
+    def compress_string(msg_str, **kwargs):
+        return gzip.compress(msg_str.encode('utf8'), **kwargs)
+
+    @staticmethod
+    def decompress_string(msg_bytes):
+        return gzip.decompress(msg_bytes).decode('utf8')
 
 
 INSERT_LOG = """
@@ -31,7 +49,7 @@ INSERT into logs (uuid, created_at, msg) VALUES (?, ?, ?);
 """
 def insert_msg(conn, msg, created_at):
     msg_uuid = uuid.uuid4()
-    c = conn.execute(INSERT_LOG, (msg_uuid, created_at, msg))
+    c = conn.execute(INSERT_LOG, (msg_uuid, created_at, Gzip(msg)))
     conn.commit()
     return msg_uuid
 
