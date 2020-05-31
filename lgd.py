@@ -970,9 +970,12 @@ def all_tags(conn):
     return [r[0] for r in c.fetchall()]
 
 
-def prompt_for_delete(msg):
+def prompt_for_delete(msg, uuid_prefix):
+    # TODO: Improve uuid highlighting. Currently doesn't work for whole uuids.
+    uuid_fragment = Term.apply_where(Term.green, uuid_prefix, str(msg[ID])[:8])
     msg_fragment = msg[MSG][:46].replace('\n', '\\n')
-    prompt = f'Delete {str(msg[ID])[:8]}..., "{msg_fragment}..." (Y/n) '
+
+    prompt = f'{Term.warning("Delete")} {uuid_fragment}..., "{msg_fragment}..." (Y/n) '
     return input(prompt).lower() == 'y'
 
 
@@ -989,7 +992,7 @@ if __name__ == '__main__':
         if msgs:
             for msg in msgs:
                 try:
-                    confirmed = prompt_for_delete(msg)
+                    confirmed = prompt_for_delete(msg, uuid_prefix)
                 except EOFError:
                     print('')
                     sys.exit()
