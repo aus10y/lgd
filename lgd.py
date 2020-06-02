@@ -372,11 +372,22 @@ def open_temp_logfile(lines=None):
 INSERT_LOG = """
 INSERT into logs (uuid, created_at, msg) VALUES (?, CURRENT_TIMESTAMP, ?);
 """
+
 def insert_msg(conn, msg):
     msg_uuid = uuid.uuid4()
     c = conn.execute(INSERT_LOG, (msg_uuid, Gzip(msg),))
     conn.commit()
     return msg_uuid
+
+
+UPDATE_LOG = """
+UPDATE logs SET msg = ? WHERE uuid = ?
+"""
+
+def update_msg(conn, msg_uuid, msg):
+    c = conn.execute(UPDATE_LOG, (Gzip(msg), msg_uuid))
+    return c.rowcount == 1
+
 
 AND_DATE_BETWEEN_TEMPL = """
  AND {column} BETWEEN '{begin}' AND '{end}'
@@ -819,9 +830,7 @@ class LogDiff:
         return True
 
     def _update_msg(self, conn):
-        update = "UPDATE logs SET msg = ? WHERE uuid = ?"
-        c = conn.execute(update, (self.msg, self.msg_uuid))
-        return c.rowcount == 1
+        return update_msg(conn, self.msg_uuid, self.msg)
 
     def _update_diffs(self, conn):
         # TODO: Save diff info
