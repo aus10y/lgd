@@ -22,50 +22,80 @@ DEBUG = False
 #-----------------------------------------------------------------------------
 # Argparse stuff
 
-# Capture YYYY, optional separators, opt. MM, opt. separators, opt. DD
 date_regex = re.compile(
-    r"(?P<year>[\d]{4})[/\-_.]?(?P<month>[\d]{2})?[/\-_.]?(?P<day>[\d]{2})?"
+    r"(?P<year>[\d]{4})[/\-_.]?(?P<month>[\d]{2})?[/\-_.]?(?P<day>[\d]{2})?(?P<remainder>.*)?"
 )
 
-def sql_date_format(dt):
-    return dt.strftime('%Y-%m-%d')
 
-def to_datetime_range(arg):
-    """Produce a (From, To) tuple of strings in YYYY-MM-DD format.
-    These dates are inteded to be used in SQL queries, where the dates are
-    expected to be in `YYYY-MM-DD` format, the "From" date is inclusive, and
-    the "To" date is exclusive.
-    """
-
+def user_date_components(date_str: str) -> tuple:
     # Parse the date into separate fields.
-    match = date_regex.match(arg)
+    match = date_regex.match(date_str)
     year, month, day = match['year'], match['month'], match['day']
-    if year is None:
-        raise Exception("Invalid date format")
+
+    if year is None or match['remainder']:
+        raise argparse.ArgumentTypeError(f"Invalid date format '{date_str}'")
 
     year = int(year)
     month = int(month) if month is not None else None
     day = int(day) if day is not None else None
 
+    return (year, month, day)
+
+
+def sql_date_format(dt):
+    return dt.strftime('%Y-%m-%d')
+
+
+def date_range_from_single(date_str) -> tuple:
+    year, month, day = user_date_components(date_str)
+
     if day is not None and month is not None:
         # Full YYYY-MM-DD, increment day
-        date_to = sql_date_format(
-            datetime(year, month, day) + timedelta(days=1))
+        date_to =  datetime(year, month, day) + timedelta(days=1)
     elif day is None and month is not None:
         # YYYY-MM, increment month
         if month == 12:
-            date_to = sql_date_format(datetime(year + 1, 1, 1))
+            date_to = datetime(year + 1, 1, 1)
         else:
-            date_to = sql_date_format(datetime(year, month + 1, 1))
+            date_to = datetime(year, month + 1, 1)
     elif day is None and month is None:
         # YYYY, increment year
-        date_to = sql_date_format(datetime(year + 1, 1, 1))
+        date_to = datetime(year + 1, 1, 1)
     else:
         raise Exception("Invalid date format")
 
-    date_from = sql_date_format(datetime(year, month or 1, day or 1))
+    return (datetime(year, month or 1, day or 1), date_to)
 
-    return (date_from, date_to)
+
+def date_range_from_pair(start_str, end_str) -> tuple:
+    s_y, s_m, s_d = user_date_components(start_str)
+    e_y, e_m, e_d = user_date_components(end_str)
+    return sorted((
+        datetime(s_y, s_m or 1, s_d or 1),
+        datetime(e_y, e_m or 1, e_d or 1)
+    ))
+
+
+def to_datetime_ranges(date_args):
+    """Produce a list of (From, To) tuples of strings in YYYY-MM-DD format.
+    These dates are inteded to be used in SQL queries, where the dates are
+    expected to be in `YYYY-MM-DD` format, the "From" date is inclusive, and
+    the "To" date is exclusive.
+    """
+    if date_args is None:
+        return []
+
+    date_ranges = []
+    for date_arg in date_args:
+        if len(date_arg) == 1:
+            date_range = date_range_from_single(*date_arg)
+        elif len(date_arg) == 2:
+            date_range = date_range_from_pair(*date_arg)
+        else:
+            raise Exception("`-d/--date` must only be given one or two values")
+        date_ranges.append(date_range)
+
+    return date_ranges
 
 
 parser = argparse.ArgumentParser(
@@ -87,7 +117,7 @@ parser.add_argument(
     help="Delete the message with the given ID."
 )
 parser.add_argument(
-    '-d', '--date', action='store', type=to_datetime_range, dest='date_range',
+    '-d', '--date', action='append', nargs='+', type=str, dest='date_ranges',
     help=(
         "Filter by year, month, day."
         " Ex. `-d YYYYMMDD`. The year, month, day fields may optionally be"
@@ -354,15 +384,20 @@ def prompt_for_delete(msg, uuid_prefix):
 
 
 def open_temp_logfile(lines=None):
-    with tempfile.NamedTemporaryFile(suffix=".md") as tf:
+    with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tf:
         if lines:
             tf.writelines(line.encode('utf8') for line in lines)
             tf.flush()
+        tf.close()
 
         call([EDITOR, tf.name])
 
-        tf.seek(0)
-        return tf.read().decode('utf8')
+        with open(tf.name) as f:
+            contents = f.read()
+
+        os.unlink(tf.name)
+
+    return contents
 
 #------------------------------------------------------------------------------
 # SQL queries and related functions
@@ -390,7 +425,10 @@ def update_msg(conn, msg_uuid, msg):
 
 
 AND_DATE_BETWEEN_TEMPL = """
- AND {column} BETWEEN '{begin}' AND '{end}'
+ AND ({ranges})
+"""
+_DATE_BETWEEN_FRAGMENT = """
+({column} BETWEEN '{begin}' AND '{end}')
 """
 SELECT_LOGS_HAVING_TAGS_TEMPL = """
 SELECT logs.uuid
@@ -435,13 +473,19 @@ ORDER BY logs.created_at;
 """
 
 
-def _format_date_range(column, date_range):
-    if date_range:
-        return AND_DATE_BETWEEN_TEMPL.format(
-            column=column,
-            begin=date_range[0], end=date_range[1])
-    else:
+def _format_date_range(column, date_ranges):
+    if not date_ranges:
         return ''
+
+    ranges = ' OR '.join(
+        _DATE_BETWEEN_FRAGMENT.format(
+            column=column,
+            begin=date_range[0], end=date_range[1]
+        )
+        for date_range in date_ranges
+    )
+
+    return AND_DATE_BETWEEN_TEMPL.format(ranges=ranges)
 
 
 def format_template_tags_dates(template, tags, date_col, date_range):
@@ -840,6 +884,7 @@ class LogDiff:
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    args.date_ranges = to_datetime_ranges(args.date_ranges)
 
     dir_setup()
     conn = get_connection()
@@ -886,10 +931,10 @@ if __name__ == '__main__':
         sys.exit()
 
     # Display messages
-    if args.tags or args.date_range:
-        messages = messages_with_tags(conn, args.tags, args.date_range)
+    if args.tags or args.date_ranges:
+        messages = messages_with_tags(conn, args.tags, args.date_ranges)
         if not messages:
-            tag_groups = (' && '.join(group) for group in args.tags)
+            tag_groups = (' && '.join(group) for group in (args.tags or []))
             all_tags = (' || '.join(f"({tg})" for tg in tag_groups))
             print(f"No messages found for tags: {all_tags}")
             sys.exit()
