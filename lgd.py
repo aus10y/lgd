@@ -204,6 +204,17 @@ CREATE INDEX IF NOT EXISTS assc_log_index ON logs_tags (log_uuid);
 CREATE_ASSC_TAGS_INDEX = """
 CREATE INDEX IF NOT EXISTS assc_tag_index ON logs_tags (tag_uuid);
 """
+CREATE_TAG_RELATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS tag_relations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag_uuid UUID NOT NULL,
+    tag_uuid_denoted UUID NOT NULL,
+    FOREIGN KEY (tag_uuid) REFERENCES tags(uuid) ON DELETE CASCADE,
+    FOREIGN KEY (tag_uuid_denoted) REFERENCES tags(uuid) ON DELETE CASCADE,
+    UNIQUE(id, tag_uuid, tag_uuid_denoted)
+);
+"""
+
 
 def get_connection():
     # This creates the sqlite db if it doesn't exist.
@@ -244,6 +255,9 @@ def db_init(conn):
     conn.execute(CREATE_ASSOC_TABLE)
     conn.execute(CREATE_ASSC_LOGS_INDEX)
     conn.execute(CREATE_ASSC_TAGS_INDEX)
+
+    # Ensure tag relations table
+    conn.execute(CREATE_TAG_RELATIONS_TABLE)
 
     conn.commit()
     print("performed initial db setup")
