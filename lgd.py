@@ -133,8 +133,8 @@ parser.add_argument(
     )
 )
 parser.add_argument(
-    '-TA', '--tag-associate', action='append', nargs=2, dest='tag_association',
-    metavar=('explicit', 'denoted'),
+    '-TA', '--tag-associate', dest='tag_associate',
+    action='append', nargs=2, metavar=('explicit', 'denoted'),
     help=(
         "Create an association between two tags."
         " Any note tagged with the 'explicit' tag, will behave as if it is"
@@ -142,8 +142,8 @@ parser.add_argument(
     )
 )
 parser.add_argument(
-    '-TD', '--tag-disassociate', action='append', nargs=2, dest='tag_association',
-    metavar=('explicit', 'denoted'),
+    '-TD', '--tag-disassociate', dest='tag_disassociate',
+    action='append', nargs=2, metavar=('explicit', 'denoted'),
     help=(
         "Remove an association between two tags."
     )
@@ -432,6 +432,10 @@ def open_temp_logfile(lines=None):
 #------------------------------------------------------------------------------
 # SQL queries and related functions
 
+class LgdException(Exception):
+    pass
+
+
 ## Log / Message related
 
 INSERT_LOG = """
@@ -656,8 +660,52 @@ def insert_asscs(conn, msg_uuid, tag_uuids):
     conn.commit()
     return
 
+## Tag Associations
+
+INSERT_TAG_RELATION = """
+INSERT INTO tag_relations (tag_uuid, tag_uuid_denoted) VALUES (?, ?);
+"""
+def insert_tag_relation(conn, explicit, implicit):
+    tags = select_tags(conn, (explicit, implicit))
+    tags = {t[TAG]: t[ID] for t in tags}
+
+    if explicit not in tags:
+        raise LgdException(f"Relation not created; Tag '{explicit}' not found!")
+    if implicit not in tags:
+        raise LgdException(f"Relation not created; Tag '{implicit}' not found!")
+
+    explicit_uuid = tags[explicit]
+    implicit_uuid = tags[implicit]
+
+    with conn:
+        conn.execute(INSERT_TAG_RELATION, (explicit_uuid, implicit_uuid))
+
+    return
+
+
+REMOVE_TAG_RELATION = """
+DELETE from tag_relations WHERE tag_uuid = ? AND tag_uuid_denoted = ?;
+"""
+def remove_tag_relation(conn, explicit, implicit):
+    tags = select_tags(conn, (explicit, implicit))
+    tags = {t[TAG]: t[ID] for t in tags}
+
+    if explicit not in tags:
+        raise LgdException(f"Relation not removed: Tag '{explicit}' not found!")
+    if implicit not in tags:
+        raise LgdException(f"Relation not removed: Tag '{implicit}' not found!")
+
+    explicit_uuid = tags[explicit]
+    implicit_uuid = tags[implicit]
+
+    with conn:
+        conn.execute(REMOVE_TAG_RELATION, (explicit_uuid, implicit_uuid))
+
+    return
+
+
 #------------------------------------------------------------------------------
-# Rendiring and Diffing logs
+# Rendering and Diffing logs
 
 class RenderedLog:
 
@@ -919,6 +967,27 @@ if __name__ == '__main__':
     dir_setup()
     conn = get_connection()
     db_setup(conn)
+
+    if args.tag_associate or args.tag_disassociate:
+        # Add associations
+        for explicit, implicit in (args.tag_associate or []):
+            try:
+                insert_tag_relation(conn, explicit, implicit)
+            except LgdException as e:
+                print(Term.warning(str(e)))
+                sys.exit()
+            print(Term.green(f" - Created '{explicit}' -> '{implicit}' relation"))
+
+        # Remove associations
+        for explicit, implicit in (args.tag_disassociate or []):
+            try:
+                remove_tag_relation(conn, explicit, implicit)
+            except LgdException as e:
+                print(Term.warning(str(e)))
+                sys.exit()
+            print(Term.green(f" - Removed '{explicit}' -> '{implicit}' relation"))
+
+        sys.exit()
 
     if args.delete is not None:
         uuid_prefix = args.delete.replace('-', '')
