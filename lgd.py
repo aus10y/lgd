@@ -132,6 +132,22 @@ parser.add_argument(
         "Take input from STDIN, echo to STDOUT."
     )
 )
+parser.add_argument(
+    '-TA', '--tag-associate', action='append', nargs=2, dest='tag_association',
+    metavar=('explicit', 'denoted'),
+    help=(
+        "Create an association between two tags."
+        " Any note tagged with the 'explicit' tag, will behave as if it is"
+        " also tagged with the 'denoted' tag."
+    )
+)
+parser.add_argument(
+    '-TD', '--tag-disassociate', action='append', nargs=2, dest='tag_association',
+    metavar=('explicit', 'denoted'),
+    help=(
+        "Remove an association between two tags."
+    )
+)
 
 
 #-----------------------------------------------------------------------------
