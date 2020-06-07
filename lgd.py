@@ -211,7 +211,7 @@ CREATE TABLE IF NOT EXISTS tag_relations (
     tag_uuid_denoted UUID NOT NULL,
     FOREIGN KEY (tag_uuid) REFERENCES tags(uuid) ON DELETE CASCADE,
     FOREIGN KEY (tag_uuid_denoted) REFERENCES tags(uuid) ON DELETE CASCADE,
-    UNIQUE(id, tag_uuid, tag_uuid_denoted)
+    UNIQUE(tag_uuid, tag_uuid_denoted)
 );
 """
 
@@ -660,7 +660,7 @@ def insert_asscs(conn, msg_uuid, tag_uuids):
     conn.commit()
     return
 
-## Tag Associations
+## Tag Relations
 
 INSERT_TAG_RELATION = """
 INSERT INTO tag_relations (tag_uuid, tag_uuid_denoted) VALUES (?, ?);
@@ -699,9 +699,34 @@ def remove_tag_relation(conn, explicit, implicit):
     implicit_uuid = tags[implicit]
 
     with conn:
-        conn.execute(REMOVE_TAG_RELATION, (explicit_uuid, implicit_uuid))
+        result = conn.execute(REMOVE_TAG_RELATION, (explicit_uuid, implicit_uuid))
 
-    return
+    return result.rowcount == 1
+
+
+SELECT_TAG_RELATIONS = """
+WITH RECURSIVE relations (tag, tag_uuid, tag_uuid_denoted) AS (
+  SELECT tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
+  FROM tag_relations tr
+    INNER JOIN tags as tags_from on tags_from.uuid = tr.tag_uuid_denoted
+	INNER JOIN tags on tags.uuid = tr.tag_uuid
+  WHERE tags_from.tag = ?
+
+  UNION
+
+  SELECT tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
+  FROM tag_relations tr
+    INNER JOIN relations on relations.tag_uuid = tr.tag_uuid_denoted
+    INNER JOIN tags on tags.uuid = tr.tag_uuid
+)
+SELECT tag from relations;
+"""
+def select_related_tags(conn, tag):
+    """Select tags associated with `tag`."""
+    with conn:
+        results = conn.execute(SELECT_TAG_RELATIONS, (tag,))
+        tags = {r['tag'] for r in results}
+    return tags
 
 
 #------------------------------------------------------------------------------
@@ -975,17 +1000,25 @@ if __name__ == '__main__':
                 insert_tag_relation(conn, explicit, implicit)
             except LgdException as e:
                 print(Term.warning(str(e)))
-                sys.exit()
-            print(Term.green(f" - Created '{explicit}' -> '{implicit}' relation"))
+            except sqlite3.IntegrityError as e:
+                if 'unique' in str(e).lower():
+                    print(Term.warning(
+                        f"Tag relation '{explicit}' -> '{implicit}' already exists!"
+                    ))
+            else:
+                print(Term.green(f" - Created '{explicit}' -> '{implicit}' relation"))
 
         # Remove associations
         for explicit, implicit in (args.tag_disassociate or []):
             try:
-                remove_tag_relation(conn, explicit, implicit)
+                removed = remove_tag_relation(conn, explicit, implicit)
             except LgdException as e:
                 print(Term.warning(str(e)))
-                sys.exit()
-            print(Term.green(f" - Removed '{explicit}' -> '{implicit}' relation"))
+            else:
+                if removed:
+                    print(Term.green(f"Removed '{explicit}' -> '{implicit}' relation"))
+                else:
+                    print(Term.warning(f"Relation '{explicit}' -> '{implicit}' doesn't exist!"))
 
         sys.exit()
 
