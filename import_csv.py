@@ -7,41 +7,13 @@ import uuid
 
 from pathlib import Path
 
+from lgd import get_connection, Gzip
+
 
 DB_PATH = Path.home() / Path('.lgd/logs.db')
 CREATED_AT = 'created_at'
 MSG = 'msg'
 TAGS = 'tags'
-
-
-def get_connection():
-    # This creates the sqlite db if it doesn't exist.
-    conn = sqlite3.connect(str(DB_PATH), detect_types=sqlite3.PARSE_DECLTYPES)
-
-    # Register adapters and converters.
-    sqlite3.register_adapter(uuid.UUID, lambda u: u.bytes)
-    sqlite3.register_converter('UUID', lambda b: uuid.UUID(bytes=b))
-    sqlite3.register_adapter(Gzip, lambda s: Gzip.compress_string(s))
-    sqlite3.register_converter(Gzip.COL_TYPE, lambda b: Gzip.decompress_string(b))
-
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
-
-
-class Gzip(str):
-    """This class exisits to aid sqlite adapters and converters for compressing
-    text via gzip."""
-
-    COL_TYPE = 'GZIP'
-
-    @staticmethod
-    def compress_string(msg_str, **kwargs):
-        return gzip.compress(msg_str.encode('utf8'), **kwargs)
-
-    @staticmethod
-    def decompress_string(msg_bytes):
-        return gzip.decompress(msg_bytes).decode('utf8')
 
 
 INSERT_LOG = """

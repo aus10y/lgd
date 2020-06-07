@@ -5,16 +5,10 @@ import sys
 
 from pathlib import Path
 
+from lgd import get_connection
+
 
 DB_PATH = Path.home() / Path('.lgd/logs.db')
-
-
-def get_connection():
-    # This creates the sqlite db if it doesn't exist.
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
 
 
 def get_messages_tags(con):
