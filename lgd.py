@@ -3,6 +3,7 @@ import argparse
 import cmd
 import difflib
 import gzip
+import itertools
 import os
 import re
 import sys
@@ -722,11 +723,33 @@ WITH RECURSIVE relations (tag, tag_uuid, tag_uuid_denoted) AS (
 SELECT tag from relations;
 """
 def select_related_tags(conn, tag):
-    """Select tags associated with `tag`."""
+    """Select tags associated with the given tag."""
+    tags = {tag}
     with conn:
         results = conn.execute(SELECT_TAG_RELATIONS, (tag,))
-        tags = {r['tag'] for r in results}
+        tags.update({r['tag'] for r in results})
     return tags
+
+
+def expand_tag_groups(conn, tag_groups):
+    """
+    Given a set of "tag groups" (a list of lists of tags), expand those tags to
+    include related tags, while maintaing the appropriate AND and OR
+    relationships between the groups.
+    """
+    expanded_groups = []
+    for tag_group in tag_groups:
+        related_groups = []
+        for tag in tag_group:
+            # Expand the tag into it's related tags
+            related_groups.append(
+                select_related_tags(conn, tag)
+            )
+
+        # Find the product of the groups of related tags.
+        expanded_groups.extend(list(itertools.product(*related_groups)))
+
+    return expanded_groups
 
 
 #------------------------------------------------------------------------------
@@ -1064,14 +1087,17 @@ if __name__ == '__main__':
 
     # Display messages
     if args.tags or args.date_ranges:
-        messages = messages_with_tags(conn, args.tags, args.date_ranges)
+        tag_groups = [tg for tg in args.tags if tg]
+        expanded_tag_groups = expand_tag_groups(conn, tag_groups)
+
+        messages = messages_with_tags(conn, expanded_tag_groups, args.date_ranges)
         if not messages:
-            tag_groups = (' && '.join(group) for group in (args.tags or []))
+            tag_groups = (' && '.join(group) for group in expanded_tag_groups)
             all_tags = (' || '.join(f"({tg})" for tg in tag_groups))
             print(f"No messages found for tags: {all_tags}")
             sys.exit()
 
-        message_view = RenderedLog(messages, args.tags)
+        message_view = RenderedLog(messages, expanded_tag_groups)
         edited = open_temp_logfile(message_view.rendered)
         diffs = message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
         for diff in diffs:
