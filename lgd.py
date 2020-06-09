@@ -16,11 +16,11 @@ from pathlib import Path
 from subprocess import call
 
 
-EDITOR = os.environ.get('EDITOR','vim')
+EDITOR = os.environ.get('EDITOR', 'vim')
 DEBUG = False
 
 
-#-----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Argparse stuff
 
 date_regex = re.compile(
@@ -151,7 +151,7 @@ parser.add_argument(
 )
 
 
-#-----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Path
 
 LGD_PATH = Path.home() / Path('.lgd')
@@ -159,7 +159,8 @@ def dir_setup():
     # If our dir doesn't exist, create it.
     LGD_PATH.mkdir(mode=0o770, exist_ok=True)
 
-#-----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
 # Database Setup
 
 DB_NAME = 'logs.db'
@@ -272,7 +273,7 @@ def db_setup(conn):
     """Set up the database and perform necessary migrations."""
     version = get_user_version(conn)
     if version == DB_USER_VERSION:
-        return # the DB is up to date.
+        return  # the DB is up to date.
 
     # TODO: transactions?
     # TODO: Backup the database before migrating.
@@ -286,7 +287,8 @@ def db_setup(conn):
             migration(conn)
             version = set_user_version(conn, version + 1)
 
-#------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 # Autocompleting Tag Prompt
 
 class TagPrompt(cmd.Cmd):
@@ -335,7 +337,8 @@ class TagPrompt(cmd.Cmd):
     def user_tags(self):
         return self._final_tags
 
-#------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 # Terminal Color Helpers
 
 class Term:
@@ -380,7 +383,8 @@ class Term:
     def apply_where(color_func, sub_string, text):
         return text.replace(sub_string, color_func(sub_string))
 
-#------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 # Misc. Utilities
 
 class Gzip(str):
@@ -430,7 +434,8 @@ def open_temp_logfile(lines=None):
 
     return contents
 
-#------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 # SQL queries and related functions
 
 class LgdException(Exception):
@@ -646,9 +651,10 @@ def insert_tags(conn, tags):
     return tag_uuids
 
 
-def all_tags(conn):
+def select_all_tags(conn):
     c = conn.execute("SELECT tags.tag FROM tags;")
     return [r[0] for r in c.fetchall()]
+
 
 ## Log-Tag associations
 
@@ -710,7 +716,7 @@ WITH RECURSIVE relations (tag, tag_uuid, tag_uuid_denoted) AS (
   SELECT tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
   FROM tag_relations tr
     INNER JOIN tags as tags_from on tags_from.uuid = tr.tag_uuid_denoted
-	INNER JOIN tags on tags.uuid = tr.tag_uuid
+    INNER JOIN tags on tags.uuid = tr.tag_uuid
   WHERE tags_from.tag = ?
 
   UNION
@@ -752,7 +758,7 @@ def expand_tag_groups(conn, tag_groups):
     return expanded_groups
 
 
-#------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Rendering and Diffing logs
 
 class RenderedLog:
@@ -875,7 +881,6 @@ class RenderedLog:
         raw_tags = (t.strip() for t in line[len(TAG_LINE):].split(','))
         return [t for t in raw_tags if t]
 
-
     def diff(self, other, debug=False):
         """
         return an iterable of LogDiffs
@@ -895,7 +900,7 @@ class RenderedLog:
                 if line_num in (line_from, line_to) and not RenderedLog._is_emptyline(text):
                     # Ignore the empty lines that we added, unless the user
                     # made a change.
-                    # TODO: still not fully working when removing a real emptly line from bottom of message.
+                    # TODO: still not fully working when removing a real empty line from bottom of message.
                     msg_diff.append(text)
                 elif line_from < line_num < line_to:
                     # Line belongs to the current msg
@@ -958,7 +963,6 @@ class LogDiff:
         id_str = str(self.msg_uuid) if not self.is_new else 'New'
         return f"<LogDiff({id_str})>\n{str(self)}</LogDiff>"
 
-
     def update_or_create(self, conn, commit=True):
         if self.is_new:
             return self._create(conn, commit=commit)
@@ -1006,7 +1010,8 @@ class LogDiff:
         # TODO: Save diff info
         return True
 
-#------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
     args = parser.parse_args()
