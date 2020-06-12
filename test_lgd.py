@@ -66,7 +66,7 @@ class TestDBSetup(unittest.TestCase):
     def setUp(self):
         self.conn = lgd.get_connection(DB_IN_MEM)
 
-    def test_db_version(self):
+    def test_migrations(self):
         # App version before migrations
         current_version = lgd.get_user_version(self.conn)
         self.assertNotEqual(current_version, lgd.DB_USER_VERSION)
@@ -76,6 +76,18 @@ class TestDBSetup(unittest.TestCase):
         # After migrations
         current_version = lgd.get_user_version(self.conn)
         self.assertEqual(current_version, lgd.DB_USER_VERSION)
+
+    def test_db_version(self):
+        version = lgd.get_user_version(self.conn)
+        self.assertEqual(version, 0)
+
+        lgd.set_user_version(self.conn, 1)
+        version = lgd.get_user_version(self.conn)
+        self.assertEqual(version, 1)
+
+        lgd.set_user_version(self.conn, 3)
+        version = lgd.get_user_version(self.conn)
+        self.assertEqual(version, 3)
 
 
 class TestDBNotes(unittest.TestCase):
