@@ -155,6 +155,8 @@ parser.add_argument(
 # Path
 
 LGD_PATH = Path.home() / Path('.lgd')
+
+
 def dir_setup():
     # If our dir doesn't exist, create it.
     LGD_PATH.mkdir(mode=0o770, exist_ok=True)
@@ -269,7 +271,7 @@ def db_updated(conn):
     print(f"DB updated")
 
 
-def db_setup(conn):
+def db_setup(conn, migrations):
     """Set up the database and perform necessary migrations."""
     version = get_user_version(conn)
     if version == DB_USER_VERSION:
@@ -277,10 +279,6 @@ def db_setup(conn):
 
     # TODO: transactions?
     # TODO: Backup the database before migrating.
-
-    migrations = [
-        (1, db_init),
-    ]
 
     for migration_version, migration in migrations:
         if version < migration_version:
@@ -1019,7 +1017,11 @@ if __name__ == '__main__':
 
     dir_setup()
     conn = get_connection(str(DB_PATH))
-    db_setup(conn)
+
+    migrations = [
+        (1, db_init),
+    ]
+    db_setup(conn, migrations)
 
     if args.tag_associate or args.tag_disassociate:
         # Add associations

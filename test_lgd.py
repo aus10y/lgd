@@ -71,7 +71,7 @@ class TestDBSetup(unittest.TestCase):
         current_version = lgd.get_user_version(self.conn)
         self.assertNotEqual(current_version, lgd.DB_USER_VERSION)
 
-        lgd.db_setup(self.conn)
+        lgd.db_setup(self.conn, [(1, lgd.db_init)])
 
         # After migrations
         current_version = lgd.get_user_version(self.conn)
