@@ -267,6 +267,11 @@ def db_init(conn):
     print("performed initial db setup")
 
 
+DB_MIGRATIONS = [
+    (1, db_init),
+]
+
+
 def db_updated(conn):
     print(f"DB updated")
 
@@ -1018,10 +1023,7 @@ if __name__ == '__main__':
     dir_setup()
     conn = get_connection(str(DB_PATH))
 
-    migrations = [
-        (1, db_init),
-    ]
-    db_setup(conn, migrations)
+    db_setup(conn, DB_MIGRATIONS)
 
     if args.tag_associate or args.tag_disassociate:
         # Add associations
