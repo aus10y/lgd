@@ -218,9 +218,9 @@ CREATE TABLE IF NOT EXISTS tag_relations (
 """
 
 
-def get_connection():
+def get_connection(db_path):
     # This creates the sqlite db if it doesn't exist.
-    conn = sqlite3.connect(str(DB_PATH), detect_types=sqlite3.PARSE_DECLTYPES)
+    conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
 
     # Register adapters and converters.
     sqlite3.register_adapter(uuid.UUID, lambda u: u.bytes)
@@ -1018,7 +1018,7 @@ if __name__ == '__main__':
     args.date_ranges = to_datetime_ranges(args.date_ranges)
 
     dir_setup()
-    conn = get_connection()
+    conn = get_connection(str(DB_PATH))
     db_setup(conn)
 
     if args.tag_associate or args.tag_disassociate:
