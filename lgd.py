@@ -1020,6 +1020,40 @@ class LogDiff:
 
 # -----------------------------------------------------------------------------
 
+def handle_tag_associate(conn, to_associate):
+    for explicit, implicit in (args.tag_associate or []):
+        try:
+            insert_tag_relation(conn, explicit, implicit)
+        except LgdException as e:
+            print(Term.warning(str(e)))
+        except sqlite3.IntegrityError as e:
+            if 'unique' in str(e).lower():
+                print(Term.warning(
+                    f"Tag relation '{explicit}' -> '{implicit}' already exists!"
+                ))
+        else:
+            print(Term.green(f"Created '{explicit}' -> '{implicit}' relation"))
+
+
+def handle_tag_disassociate(conn, to_disassociate):
+    for explicit, implicit in (args.tag_disassociate or []):
+        try:
+            removed = remove_tag_relation(conn, explicit, implicit)
+        except LgdException as e:
+            print(Term.warning(str(e)))
+        else:
+            if removed:
+                print(Term.green(
+                    f"Removed '{explicit}' -> '{implicit}' relation"
+                ))
+            else:
+                print(Term.warning(
+                    f"Relation '{explicit}' -> '{implicit}' doesn't exist!"
+                ))
+
+
+# -----------------------------------------------------------------------------
+
 if __name__ == '__main__':
     args = parser.parse_args()
     args.date_ranges = to_datetime_ranges(args.date_ranges)
@@ -1030,32 +1064,8 @@ if __name__ == '__main__':
     db_setup(conn, DB_MIGRATIONS)
 
     if args.tag_associate or args.tag_disassociate:
-        # Add associations
-        for explicit, implicit in (args.tag_associate or []):
-            try:
-                insert_tag_relation(conn, explicit, implicit)
-            except LgdException as e:
-                print(Term.warning(str(e)))
-            except sqlite3.IntegrityError as e:
-                if 'unique' in str(e).lower():
-                    print(Term.warning(
-                        f"Tag relation '{explicit}' -> '{implicit}' already exists!"
-                    ))
-            else:
-                print(Term.green(f"Created '{explicit}' -> '{implicit}' relation"))
-
-        # Remove associations
-        for explicit, implicit in (args.tag_disassociate or []):
-            try:
-                removed = remove_tag_relation(conn, explicit, implicit)
-            except LgdException as e:
-                print(Term.warning(str(e)))
-            else:
-                if removed:
-                    print(Term.green(f"Removed '{explicit}' -> '{implicit}' relation"))
-                else:
-                    print(Term.warning(f"Relation '{explicit}' -> '{implicit}' doesn't exist!"))
-
+        handle_tag_associate(conn, (args.tag_associate or []))
+        handle_tag_disassociate(conn, (args.tag_disassociate or []))
         sys.exit()
 
     if args.delete is not None:
