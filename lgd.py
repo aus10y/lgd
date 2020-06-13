@@ -680,12 +680,16 @@ def insert_tag_relation(conn, explicit, implicit):
     tags = {t[TAG]: t[ID] for t in tags}
 
     if explicit not in tags:
-        raise LgdException(f"Relation not created; Tag '{explicit}' not found!")
-    if implicit not in tags:
-        raise LgdException(f"Relation not created; Tag '{implicit}' not found!")
+        explicit_uuid = insert_tags(conn, (explicit,)).pop()
+        print(f"- Inserted '{explicit}' tag'")
+    else:
+        explicit_uuid = tags[explicit]
 
-    explicit_uuid = tags[explicit]
-    implicit_uuid = tags[implicit]
+    if implicit not in tags:
+        implicit_uuid = insert_tags(conn, (implicit,)).pop()
+        print(f"- Inserted '{implicit}' tag'")
+    else:
+        implicit_uuid = tags[implicit]
 
     with conn:
         conn.execute(INSERT_TAG_RELATION, (explicit_uuid, implicit_uuid))
@@ -1038,7 +1042,7 @@ if __name__ == '__main__':
                         f"Tag relation '{explicit}' -> '{implicit}' already exists!"
                     ))
             else:
-                print(Term.green(f" - Created '{explicit}' -> '{implicit}' relation"))
+                print(Term.green(f"Created '{explicit}' -> '{implicit}' relation"))
 
         # Remove associations
         for explicit, implicit in (args.tag_disassociate or []):
