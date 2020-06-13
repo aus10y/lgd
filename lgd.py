@@ -103,9 +103,9 @@ parser = argparse.ArgumentParser(
     description="A flexible knowledge store."
 )
 parser.add_argument(
-    '-s', '--show', action='append', nargs='*', dest='tags',
+    '-t', '--tag', action='append', nargs='*', dest='tags',
     help=(
-        "Show messages.\n"
+        "Show or tag a message or messages with the given tags.\n"
         " Filter messages by adding one or more tags separated by spaces.\n"
         " Matching messages must contain all given tags.\n"
         " Ex. `-s foo`, `-s foo bar`.\n"
