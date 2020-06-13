@@ -1114,12 +1114,6 @@ if __name__ == '__main__':
         expanded_tag_groups = expand_tag_groups(conn, tag_groups)
 
         messages = messages_with_tags(conn, expanded_tag_groups, args.date_ranges)
-        if not messages:
-            tag_groups = (' && '.join(group) for group in expanded_tag_groups)
-            all_tags = (' || '.join(f"({tg})" for tg in tag_groups))
-            print(f"No messages found for tags: {all_tags}")
-            sys.exit()
-
         message_view = RenderedLog(messages, expanded_tag_groups)
         edited = open_temp_logfile(message_view.rendered)
         diffs = message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
