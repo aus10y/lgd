@@ -149,6 +149,12 @@ parser.add_argument(
         "Remove an association between two tags."
     )
 )
+parser.add_argument(
+    '--plain', action='store_true', default=False,
+    help=(
+        "Disable rendering of note metadata in the editor."
+    )
+)
 
 
 # ----------------------------------------------------------------------------
@@ -770,63 +776,78 @@ def expand_tag_groups(conn, tag_groups):
 
 class RenderedLog:
 
-    def __init__(self, logs, tags):
+    def __init__(self, logs, tags, style=True):
         """
         logs: A list/tuple, of 2-tuples (uuid, message)
         tags: The tags used to find the given logs. A list of lists of tags.
         """
         self.logs = list(logs)
         self.tag_groups = list(tags) if tags else tuple()
+        self._styled = style
         self._all_tags = flatten_tag_groups(self.tag_groups)
         self._lines = []
         self._line_map = []
-        self._render()  # Set up self._lines and self._lines_map
+        self._render(style)  # Set up self._lines and self._lines_map
 
-    def _render(self):
+    def _render(self, style):
         # Header
-        if self.tag_groups:
-            tag_groups = (', '.join(group) for group in self.tag_groups)
-            tags_together = (' || '.join(f"<{tg}>" for tg in tag_groups))
-            header = f"# TAGS: {tags_together}\n"
-            self._lines.append(header)
+        if style and self.tag_groups:
+            self._lines.append(RenderedLog._editor_header(self.tag_groups))
 
         # Body
         linenum_init, linenum_last = None, None
         for row in self.logs:
             # Set the header for each message.
-            tags_str = '' if row[TAGS] is None else row[TAGS].replace(',', ', ')
-            """
-            self._lines.extend((
-                f'\n',
-                f'{79*"-"}\n',
-                f'# ID: {row[ID]}\n',
-                f'# Created: {row[CREATED_AT]}\n',
-                f'# Tags: {tags_str}\n',
-                f'\n',
-            ))
-            """
-            self._lines.extend((
-                f'\n',
-                f'{79*"-"}\n',
-                f'# {row[CREATED_AT]}\n',
-                f'[ID: {row[ID]}]: # (Tags: {tags_str})\n',
-                f'\n',
-            ))
+            if style:
+                self._lines.extend(RenderedLog._note_header(row))
+                linenum_init = len(self._lines) - 1
+            else:
+                linenum_init = len(self._lines)
 
-            linenum_init = len(self._lines)
             self._lines.extend(row[MSG].splitlines(keepends=True))
 
-            linenum_last = len(self._lines) + 1
+            if style:
+                self._lines.extend(RenderedLog._note_footer(row))
+
+            linenum_last = len(self._lines)
+
             self._line_map.append((row[ID], linenum_init, linenum_last))
 
         # Footer
-        self._lines.extend((
-            '\n',
+        if style:
+            self._lines.extend(RenderedLog._editor_footer(set(self._all_tags)))
+
+    @staticmethod
+    def _editor_header(tag_groups):
+        tag_groups = (', '.join(group) for group in tag_groups)
+        tags_together = (' || '.join(f"<{tg}>" for tg in tag_groups))
+        header = f"# TAGS: {tags_together}\n"
+        return header
+
+    @staticmethod
+    def _note_header(msg_row):
+        tags_str = '' if msg_row[TAGS] is None else msg_row[TAGS].replace(',', ', ')
+        header = (
+            f'{79*"-"}\n',
+            f'# {msg_row[CREATED_AT]}\n',
+            f'[ID: {msg_row[ID]}]: # (Tags: {tags_str})\n',
+            f'\n',
+        )
+        return header
+
+    @staticmethod
+    def _note_footer(msg_row):
+        return ('\n',)
+
+    @staticmethod
+    def _editor_footer(tags):
+        footer = (
             f'{79*"-"}\n',
             f'# Enter new log message below\n',
-            f'# Tags: {", ".join(self._all_tags)}\n',
+            f'# Tags: {", ".join(tags)}\n',
             '\n',
-        ))
+        )
+        return footer
 
     @property
     def rendered(self):
@@ -854,16 +875,23 @@ class RenderedLog:
 
     @staticmethod
     def _enumerate_diff(diff_lines):
+        first_line = True
         line_num = 0
+
         for line in diff_lines:
             if RenderedLog._is_intraline(line):
                 # These intraline differences are not needed.
                 continue
 
-            if not RenderedLog._is_addition(line):
-                line_num += 1
-
-            yield (line_num, line)
+            if RenderedLog._is_addition(line):
+                yield (line_num, line)
+            else:
+                if first_line:
+                    yield (line_num, line)
+                    first_line = False
+                else:
+                    line_num += 1
+                    yield (line_num, line)
 
     @staticmethod
     def _print_diff_info(line_num, msg_uuid, line_from, line_to, text, debug=False):
@@ -898,32 +926,44 @@ class RenderedLog:
         diff = difflib.ndiff(self._lines, list(other))
         diff = list(RenderedLog._enumerate_diff(diff))
 
+        line_num, text = diff[diff_index]
+
         for msg_uuid, line_from, line_to in self._line_map:
-            while True:
-                if line_to < line_num:
-                    # Line has moved past the current 'msg'
+            advance = 0
+            for line_num, text in diff[diff_index:]:
+                if line_num < line_from:
+                    # Do nothing
+                    pass
+                elif line_num == line_from:
+                    # Handle leading synthetic newline
+                    if self._styled:
+                        if RenderedLog._is_addition(text):
+                            msg_diff.append(text)
+                    else:
+                        msg_diff.append(text)
+                elif line_from < line_num < (line_to - 1):
+                    # Handle body of note
+                    msg_diff.append(text)
+                elif line_num == (line_to - 1):
+                    # Handle trailing synthetic newline
+                    if self._styled:
+                        if RenderedLog._is_addition(text):
+                            msg_diff.append(text)
+                    else:
+                        msg_diff.append(text)
+                elif line_to <= line_num:
                     break
 
-                if line_num in (line_from, line_to) and not RenderedLog._is_emptyline(text):
-                    # Ignore the empty lines that we added, unless the user
-                    # made a change.
-                    # TODO: still not fully working when removing a real empty line from bottom of message.
-                    msg_diff.append(text)
-                elif line_from < line_num < line_to:
-                    # Line belongs to the current msg
-                    msg_diff.append(text)
+                RenderedLog._print_diff_info(
+                    line_num, msg_uuid, line_from, line_to, text, debug=debug
+                )
 
-                if diff_index < len(diff):
-                    # Line is below the current msg
-                    line_num, text = diff[diff_index]
-                    diff_index += 1
+                if RenderedLog._is_new_tag_line(text):
+                    print(f"New tags for msg '{msg_uuid}', {RenderedLog._parse_new_tags(text)}")
 
-                    RenderedLog._print_diff_info(
-                        line_num, msg_uuid, line_from, line_to, text, debug=debug
-                    )
+                advance += 1
 
-                    if RenderedLog._is_new_tag_line(text):
-                        print(f"New tags for msg '{msg_uuid}', {RenderedLog._parse_new_tags(text)}")
+            diff_index += advance
 
             # TODO: Refactor LogDiff so that lines are iteratively given to it.
             log_diffs.append(LogDiff(msg_uuid, msg_diff, tags=self._all_tags))
@@ -1114,7 +1154,7 @@ if __name__ == '__main__':
         expanded_tag_groups = expand_tag_groups(conn, tag_groups)
 
         messages = messages_with_tags(conn, expanded_tag_groups, args.date_ranges)
-        message_view = RenderedLog(messages, expanded_tag_groups)
+        message_view = RenderedLog(messages, expanded_tag_groups, style=(not args.plain))
         edited = open_temp_logfile(message_view.rendered)
         diffs = message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
         for diff in diffs:
