@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import gzip
+import sqlite3
 import unittest
 
 import lgd
@@ -73,11 +74,64 @@ class TestDBSetup(unittest.TestCase):
         current_version = lgd.get_user_version(self.conn)
         self.assertNotEqual(current_version, lgd.DB_USER_VERSION)
 
-        lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        success = lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        self.assertTrue(success, "DB migrations failed!")
 
         # After migrations
         current_version = lgd.get_user_version(self.conn)
         self.assertEqual(current_version, lgd.DB_USER_VERSION)
+
+    def test_migration_fail(self):
+        # Test that a sqlite3 exception will be caught.
+
+        def raise_err(err):
+            raise err
+
+        migrations = [
+            (1, lambda c: raise_err(sqlite3.Error))
+        ]
+
+        success = lgd.db_setup(self.conn, migrations)
+        self.assertFalse(success, "db_setup failed to catch migration failure")
+
+    def test_migration_intermediate(self):
+        BAD_TABLE = 'fail'
+
+        def bad_migration(conn):
+            conn.execute(f"CREATE TABLE {BAD_TABLE} (id INT PRIMARY KEY, data BLOB);")
+            conn.execute(f"INSERT INTO {BAD_TABLE} (id, data) VALUES (1, 'abcd');")
+            cursor = conn.execute("SELECT * FROM fail WHERE id = ?", (1,))
+            self.assertEqual(cursor.fetchone()[1], 'abcd')
+            raise sqlite3.Error
+
+        def good_migration(conn):
+            conn.execute("CREATE table success (id INT PRIMARY KEY);")
+
+        migrations = [
+            (1, good_migration),
+            (2, bad_migration),
+        ]
+
+        # Expect failure to finish all migrations
+
+        success = lgd.db_setup(self.conn, migrations)
+        self.assertFalse(success)
+
+        # Ensure good_migration succeeded.
+
+        db_version = lgd.get_user_version(self.conn)
+        self.assertEqual(db_version, 1)
+
+        # Ensure bad_migration failed and did not fail in an intermediate state
+
+        cursor = self.conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' and name = ?",
+            (BAD_TABLE,)
+        )
+        count = cursor.fetchone()[0]
+        table_exists = bool(count)
+
+        self.assertFalse(table_exists, f"count == {count}; table exists!")
 
     def test_db_version(self):
         version = lgd.get_user_version(self.conn)

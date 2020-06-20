@@ -269,32 +269,32 @@ def db_init(conn):
     # Ensure tag relations table
     conn.execute(CREATE_TAG_RELATIONS_TABLE)
 
-    conn.commit()
-    print("performed initial db setup")
-
 
 DB_MIGRATIONS = [
     (1, db_init),
 ]
 
 
-def db_updated(conn):
-    print(f"DB updated")
-
-
 def db_setup(conn, migrations):
     """Set up the database and perform necessary migrations."""
     version = get_user_version(conn)
     if version == DB_USER_VERSION:
-        return  # the DB is up to date.
+        return True  # the DB is up to date.
 
-    # TODO: transactions?
-    # TODO: Backup the database before migrating.
+    # TODO: Backup the database before migrating?
 
     for migration_version, migration in migrations:
         if version < migration_version:
-            migration(conn)
+            try:
+                with conn:
+                    conn.execute('BEGIN')
+                    migration(conn)
+            except sqlite3.Error as e:
+                print(Term.error(str(e)))
+                return False
             version = set_user_version(conn, version + 1)
+
+    return True
 
 
 # -----------------------------------------------------------------------------
@@ -1101,7 +1101,9 @@ if __name__ == '__main__':
     dir_setup()
     conn = get_connection(str(DB_PATH))
 
-    db_setup(conn, DB_MIGRATIONS)
+    if not db_setup(conn, DB_MIGRATIONS):
+        print("Failed to finish database setup!")
+        sys.exit()
 
     if args.tag_associate or args.tag_disassociate:
         handle_tag_associate(conn, (args.tag_associate or []))
