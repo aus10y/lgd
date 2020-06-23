@@ -155,6 +155,12 @@ parser.add_argument(
         "Disable rendering of note metadata in the editor."
     )
 )
+parser.add_argument(
+    '-T', '--tags', action='store_true', default=False, dest='tag_stats',
+    help=(
+        "Print tag statistics."
+    )
+)
 
 
 # ----------------------------------------------------------------------------
@@ -442,6 +448,43 @@ def open_temp_logfile(lines=None):
         os.unlink(tf.name)
 
     return contents
+
+
+def format_tag_statistics(stats):
+    stats = list(stats)
+
+    tag_width = len("Tag")
+    child_width = len("Denoted By")
+    impl_width = len("Denotes")
+
+    for row in stats:
+        tag_width = max((tag_width, len(row['tag'])))
+        child_width = max((child_width, len(row['children'])))
+        impl_width = max((impl_width, len(row['implies'])))
+
+    STATS_HEAD_TEMPL = "{: ^{tag_w}} | {: ^{direct_w}} | {: ^{indirect_w}} | {: ^{child_w}} | {: ^{impl_w}}"
+    STATS_BODY_TEMPL = "{: <{tag_w}} | {: >{direct_w}} | {: >{indirect_w}} | {: <{child_w}} | {: <{impl_w}}"
+
+    stats_table = [
+        '',
+        Term.bold(Term.header(STATS_HEAD_TEMPL.format(
+            "Tag", "Direct", "Indirect", "Denoted By", "Denotes",
+            tag_w=tag_width, direct_w=len("Direct"),
+            indirect_w=len("Indirect"), child_w=child_width, impl_w=impl_width
+        )))
+    ]
+
+    for row in stats:
+        stats_table.append(
+            STATS_BODY_TEMPL.format(
+                row['tag'], row['direct'], row['implied'], row['children'], row['implies'],
+                tag_w=tag_width, direct_w=len("Direct"),
+                indirect_w=len("Indirect"), child_w=child_width, impl_w=impl_width
+            )
+        )
+
+    stats_table.append('')
+    return stats_table
 
 
 # -----------------------------------------------------------------------------
@@ -769,6 +812,62 @@ def expand_tag_groups(conn, tag_groups):
         expanded_groups.extend(list(itertools.product(*related_groups)))
 
     return expanded_groups
+
+
+SELECT_TAG_STATISTICS = """
+WITH RECURSIVE relations (tag_FROM, tag, tag_uuid, tag_uuid_denoted) AS (
+    SELECT tags_FROM.tag, tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
+        FROM tag_relations tr
+    INNER JOIN tags AS tags_FROM ON tags_FROM.uuid = tr.tag_uuid_denoted
+    INNER JOIN tags ON tags.uuid = tr.tag_uuid
+
+    UNION
+
+    SELECT relations.tag_FROM, tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
+        FROM tag_relations tr
+    INNER JOIN relations ON relations.tag_uuid = tr.tag_uuid_denoted
+    INNER JOIN tags ON tags.uuid = tr.tag_uuid
+)
+
+SELECT
+    t1.tag,
+    COALESCE((
+        SELECT
+            COUNT(*)
+        FROM tags
+            INNER JOIN logs_tags lt ON lt.tag_uuid = tags.uuid
+            INNER JOIN logs ON logs.uuid = lt.log_uuid
+        WHERE tags.tag = t1.tag
+        GROUP BY tags.tag
+    ), 0) AS direct,
+    COALESCE((
+        SELECT
+            count(*) AS cnt
+        FROM logs
+        INNER JOIN logs_tags lt ON logs.uuid = lt.log_uuid
+        INNER JOIN tags ON lt.tag_uuid = tags.uuid
+        WHERE tags.tag in (
+            SELECT tag
+            FROM relations
+            WHERE tag_FROM = t1.tag
+        )
+    ), 0) AS implied,
+    COALESCE(REPLACE(GROUP_CONCAT(DISTINCT r.tag), ',', ', '), '') AS children,
+    COALESCE(REPLACE(GROUP_CONCAT(DISTINCT r2.tag_FROM), ',', ', '), '') AS implies
+FROM
+    tags t1
+LEFT JOIN
+    relations r ON r.tag_FROM = t1.tag
+LEFT JOIN
+    relations r2 ON r2.tag = t1.tag
+GROUP BY t1.tag
+ORDER BY implied DESC, direct DESC, t1.tag ASC;
+"""
+
+def tag_statistics(conn):
+    with conn:
+        results = conn.execute(SELECT_TAG_STATISTICS)
+    return results
 
 
 # -----------------------------------------------------------------------------
@@ -1103,6 +1202,12 @@ if __name__ == '__main__':
 
     if not db_setup(conn, DB_MIGRATIONS):
         print("Failed to finish database setup!")
+        sys.exit()
+
+    if args.tag_stats:
+        stats = format_tag_statistics(tag_statistics(conn))
+        for line in stats:
+            print(line)
         sys.exit()
 
     if args.tag_associate or args.tag_disassociate:
