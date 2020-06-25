@@ -453,24 +453,32 @@ def open_temp_logfile(lines=None):
 def format_tag_statistics(stats):
     stats = list(stats)
 
-    tag_width = len("Tag")
-    child_width = len("Denoted By")
-    impl_width = len("Denotes")
+    TAG = 'Tag'
+    DENOTED_BY = 'Denoted By'
+    DENOTES = 'Denotes'
+    DIRECT = 'Direct'
+    INDIRECT = 'Indirect'
+
+    tag_width = len(TAG)
+    denoted_by_width = len(DENOTED_BY)
+    denotes_width = len(DENOTES)
+    direct_width = len(DIRECT)
+    indirect_width = len(INDIRECT)
 
     for row in stats:
         tag_width = max((tag_width, len(row['tag'])))
-        child_width = max((child_width, len(row['children'])))
-        impl_width = max((impl_width, len(row['implies'])))
+        denoted_by_width = max((denoted_by_width, len(row['children'])))
+        denotes_width = max((denotes_width, len(row['implies'])))
 
-    STATS_HEAD_TEMPL = "{: ^{tag_w}} | {: ^{direct_w}} | {: ^{indirect_w}} | {: ^{child_w}} | {: ^{impl_w}}"
-    STATS_BODY_TEMPL = "{: <{tag_w}} | {: >{direct_w}} | {: >{indirect_w}} | {: <{child_w}} | {: <{impl_w}}"
+    STATS_HEAD_TEMPL = " {: ^{tag_w}} | {: ^{direct_w}} | {: ^{indirect_w}} | {: ^{child_w}} | {: ^{impl_w}}"
+    STATS_BODY_TEMPL = " {: <{tag_w}} | {: >{direct_w}} | {: >{indirect_w}} | {: <{child_w}} | {: <{impl_w}}"
 
     stats_table = [
-        '',
+        '',  # Empty line above table
         Term.bold(Term.header(STATS_HEAD_TEMPL.format(
-            "Tag", "Direct", "Indirect", "Denoted By", "Denotes",
-            tag_w=tag_width, direct_w=len("Direct"),
-            indirect_w=len("Indirect"), child_w=child_width, impl_w=impl_width
+            TAG, DIRECT, INDIRECT, DENOTED_BY, DENOTES,
+            tag_w=tag_width, direct_w=direct_width, indirect_w=indirect_width,
+            child_w=denoted_by_width, impl_w=denotes_width
         )))
     ]
 
@@ -478,12 +486,13 @@ def format_tag_statistics(stats):
         stats_table.append(
             STATS_BODY_TEMPL.format(
                 row['tag'], row['direct'], row['implied'], row['children'], row['implies'],
-                tag_w=tag_width, direct_w=len("Direct"),
-                indirect_w=len("Indirect"), child_w=child_width, impl_w=impl_width
+                tag_w=tag_width, direct_w=direct_width,
+                indirect_w=indirect_width, child_w=denoted_by_width,
+                impl_w=denotes_width
             )
         )
 
-    stats_table.append('')
+    stats_table.append('')  # Empty line below table
     return stats_table
 
 
