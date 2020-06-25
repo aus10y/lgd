@@ -935,10 +935,11 @@ class RenderedLog:
     @staticmethod
     def _note_header(msg_row):
         tags_str = '' if msg_row[TAGS] is None else msg_row[TAGS].replace(',', ', ')
+        id_str = str(msg_row[ID])[:8]  # Only show first eight digits of UUID
         header = (
             f'{79*"-"}\n',
             f'# {msg_row[CREATED_AT]}\n',
-            f'[ID: {msg_row[ID]}]: # (Tags: {tags_str})\n',
+            f'[ID: {id_str}]: # (Tags: {tags_str})\n',
             f'\n',
         )
         return header
