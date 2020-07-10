@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import cmd
+import csv
 import difflib
 import gzip
 import itertools
@@ -164,12 +165,11 @@ parser.add_argument(
     )
 )
 parser.add_argument(
-    '-NI', '--note-import', dest='note_file_out', action='store', type=str,
+    '-NI', '--note-import', dest='note_file_in', action='store', type=str,
     help=(
-        "Import notes, with UUIDs, created_at timestamps, note body, and tags."
+        "Import notes with UUIDs, created_at timestamps, note body, and tags."
         " The specified file should contain comma separated data (CSV) with"
-        " the following headers:\n"
-        " <HEADERS>\n"
+        " the following headers: 'uuid, created_at, body, tags'."
         " Importing a particular file is an idempotent operation."
     )
 )
@@ -1267,6 +1267,27 @@ if __name__ == '__main__':
     if not db_setup(conn, DB_MIGRATIONS):
         print("Failed to finish database setup!")
         sys.exit()
+
+    if args.note_file_out:
+        notes = messages_with_tags(conn, None)
+        with open(args.note_file_out, 'w') as out:
+            writer = csv.DictWriter(out, Note._fields)
+            writer.writeheader()
+            for note in notes:
+                # For the CSV file, for the tags to be a comma separated str.
+                note = note._replace(tags=','.join(note.tags))
+                writer.writerow(note._asdict())
+        print(f" - Exported all note data to {args.note_file_out}")
+        sys.exit()
+
+    if args.note_file_in:
+        pass
+
+    if args.tag_file_out:
+        pass
+
+    if args.tag_file_in:
+        pass
 
     if args.tag_stats:
         stats = format_tag_statistics(tag_statistics(conn))
