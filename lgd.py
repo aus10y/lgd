@@ -11,9 +11,11 @@ import sqlite3
 import tempfile
 import uuid
 
+from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
 from subprocess import call
+from typing import List, Set
 
 
 EDITOR = os.environ.get('EDITOR', 'vim')
@@ -496,6 +498,23 @@ def format_tag_statistics(stats):
     return stats_table
 
 
+def split_tags(tags: str) -> list:
+    return set(t.strip() for t in tags.split(','))
+
+
+def rows_to_notes(rows):
+    return (
+        Note(r['uuid'], r['created_at'], r['body'], split_tags(r['tags']))
+        for r in rows
+    )
+
+
+# -----------------------------------------------------------------------------
+# Types
+
+Note = namedtuple('Note', ('uuid', 'created_at', 'body', 'tags'))
+
+
 # -----------------------------------------------------------------------------
 # SQL queries and related functions
 
@@ -548,10 +567,10 @@ WHERE logs.uuid in (
 """
 SELECT_LOGS_WITH_TAGS_ALL_TEMPL = """
 SELECT
-    logs.uuid,
-    datetime(logs.created_at, 'localtime') as created_at,
-    logs.msg,
-    group_concat(tags.tag) as tags
+    logs.uuid AS uuid,
+    datetime(logs.created_at, 'localtime') AS created_at,
+    logs.msg AS body,
+    group_concat(tags.tag) AS tags
 FROM logs
 LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
 LEFT JOIN tags ON tags.uuid = lt.tag_uuid
@@ -561,10 +580,10 @@ ORDER BY logs.created_at;
 """
 SELECT_LOGS_AND_TAGS_TEMPL = """
 SELECT
-    logs.uuid,
-    datetime(logs.created_at, 'localtime') as created_at,
-    logs.msg,
-    group_concat(tags.tag) as tags
+    logs.uuid AS uuid,
+    datetime(logs.created_at, 'localtime') AS created_at,
+    logs.msg AS body,
+    group_concat(tags.tag) AS tags
 FROM logs
 LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
 LEFT JOIN tags ON tags.uuid = lt.tag_uuid
@@ -595,7 +614,7 @@ def format_template_tags_dates(template, tags, date_col, date_range):
     return template.format(tags=tags, date_range=dates)
 
 
-def _msg_uuids_having_tags(conn, tag_groups, date_range=None):
+def _msg_uuids_having_tags(conn, tag_groups, date_range=None) -> Set[uuid.UUID]:
     msg_uuids = set()  # using a set in order to de-duplicate.
 
     for tags in tag_groups:
@@ -611,18 +630,21 @@ def _msg_uuids_having_tags(conn, tag_groups, date_range=None):
     return msg_uuids
 
 
-def messages_with_tags(conn, tag_groups, date_range=None):
+def messages_with_tags(conn, tag_groups, date_range=None) -> List[Note]:
     if not tag_groups or ((len(tag_groups) == 1) and not tag_groups[0]):
         select = SELECT_LOGS_WITH_TAGS_ALL_TEMPL.format(
             date_range=_format_date_range('logs.created_at', date_range))
-        return list(conn.execute(select))
+        cursor = conn.execute(select)
+    else:
+        msg_uuids = _msg_uuids_having_tags(
+            conn, tag_groups, date_range=date_range
+        )
+        select = SELECT_LOGS_AND_TAGS_TEMPL.format(
+            msgs=', '.join('?' for _ in msg_uuids)
+        )
+        cursor = conn.execute(select, tuple(msg_uuids))
 
-    msg_uuids = _msg_uuids_having_tags(conn, tag_groups, date_range=date_range)
-    select = SELECT_LOGS_AND_TAGS_TEMPL.format(
-        msgs=', '.join('?' for _ in msg_uuids)
-    )
-
-    return list(conn.execute(select, tuple(msg_uuids)).fetchall())
+    return list(rows_to_notes(cursor.fetchall()))
 
 
 def msg_exists(conn, msg_uuid):
@@ -884,12 +906,12 @@ def tag_statistics(conn):
 
 class RenderedLog:
 
-    def __init__(self, logs, tags, style=True):
+    def __init__(self, notes, tags, style=True):
         """
         logs: A list/tuple, of 2-tuples (uuid, message)
         tags: The tags used to find the given logs. A list of lists of tags.
         """
-        self.logs = list(logs)
+        self.notes = list(notes)
         self.tag_groups = list(tags) if tags else tuple()
         self._styled = style
         self._all_tags = flatten_tag_groups(self.tag_groups)
@@ -904,22 +926,22 @@ class RenderedLog:
 
         # Body
         linenum_init, linenum_last = None, None
-        for row in self.logs:
+        for note in self.notes:
             # Set the header for each message.
             if style:
-                self._lines.extend(RenderedLog._note_header(row))
+                self._lines.extend(RenderedLog._note_header(note))
                 linenum_init = len(self._lines) - 1
             else:
                 linenum_init = len(self._lines)
 
-            self._lines.extend(row[MSG].splitlines(keepends=True))
+            self._lines.extend(note.body.splitlines(keepends=True))
 
             if style:
-                self._lines.extend(RenderedLog._note_footer(row))
+                self._lines.extend(RenderedLog._note_footer(note))
 
             linenum_last = len(self._lines)
 
-            self._line_map.append((row[ID], linenum_init, linenum_last))
+            self._line_map.append((note.uuid, linenum_init, linenum_last))
 
         # Footer
         if style:
@@ -933,19 +955,19 @@ class RenderedLog:
         return header
 
     @staticmethod
-    def _note_header(msg_row):
-        tags_str = '' if msg_row[TAGS] is None else msg_row[TAGS].replace(',', ', ')
-        id_str = str(msg_row[ID])[:8]  # Only show first eight digits of UUID
+    def _note_header(note: Note):
+        tags_str = '' if not note.tags else ', '.join(sorted(note.tags))
+        id_str = str(note.uuid)[:8]  # Only show first eight digits of UUID
         header = (
             f'{79*"-"}\n',
-            f'# {msg_row[CREATED_AT]}\n',
+            f'# {note.created_at}\n',
             f'[ID: {id_str}]: # (Tags: {tags_str})\n',
             f'\n',
         )
         return header
 
     @staticmethod
-    def _note_footer(msg_row):
+    def _note_footer(note: Note):
         return ('\n',)
 
     @staticmethod
