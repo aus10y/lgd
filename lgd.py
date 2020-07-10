@@ -163,6 +163,38 @@ parser.add_argument(
         "Print tag statistics."
     )
 )
+parser.add_argument(
+    '-NI', '--note-import', dest='note_file_out', action='store', type=str,
+    help=(
+        "Import notes, with UUIDs, created_at timestamps, note body, and tags."
+        " The specified file should contain comma separated data (CSV) with"
+        " the following headers:\n"
+        " <HEADERS>\n"
+        " Importing a particular file is an idempotent operation."
+    )
+)
+parser.add_argument(
+    '-NE', '--note-export', dest='note_file_out', action='store', type=str,
+    help=(
+        "Export notes, with UUIDs, created_at timestamps, note body, and tags."
+        " Notes will be exported in a comma separated format (CSV)."
+    )
+)
+parser.add_argument(
+    '-TI', '--tag-import', dest='tag_file_in', action='store', type=str,
+    help=(
+        "Import tag associations."
+        " The importation of tag associations is idempotent."
+        " Import does not overwrite existing tag associations."
+    )
+)
+parser.add_argument(
+    '-TE', '--tag-export', dest='tag_file_out', action='store', type=str,
+    help=(
+        "Export tag associations."
+        " Tag associations will be exported in a comma separated format (CSV)."
+    )
+)
 
 
 # ----------------------------------------------------------------------------
