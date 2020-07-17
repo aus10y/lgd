@@ -245,7 +245,8 @@ CREATE TABLE IF NOT EXISTS logs_tags (
     log_uuid UUID NOT NULL,
     tag_uuid UUID NOT NULL,
     FOREIGN KEY (log_uuid) REFERENCES logs(uuid) ON DELETE CASCADE,
-    FOREIGN KEY (tag_uuid) REFERENCES tags(uuid) ON DELETE CASCADE
+    FOREIGN KEY (tag_uuid) REFERENCES tags(uuid) ON DELETE CASCADE,
+    UNIQUE(log_uuid, tag_uuid)
 );
 """
 CREATE_ASSC_LOGS_INDEX = """
@@ -557,12 +558,20 @@ class LgdException(Exception):
 ## Log / Message related
 
 INSERT_LOG = """
-INSERT into logs (uuid, created_at, msg) VALUES (?, CURRENT_TIMESTAMP, ?);
+INSERT into logs (uuid, created_at, msg) VALUES (?, {timestamp}, ?);
 """
 
-def insert_msg(conn, msg):
-    msg_uuid = uuid.uuid4()
-    c = conn.execute(INSERT_LOG, (msg_uuid, Gzip(msg),))
+def insert_msg(conn, msg, msg_uuid=None, created_at=None):
+    msg_uuid = uuid.uuid4() if msg_uuid is None else msg_uuid
+
+    if created_at is None:
+        insert = INSERT_LOG.format(timestamp='CURRENT_TIMESTAMP')
+        params = (msg_uuid, Gzip(msg))
+    else:
+        insert = INSERT_LOG.format(timestamp='?')
+        params = (msg_uuid, created_at, Gzip(msg))
+
+    c = conn.execute(insert, params)
     conn.commit()
     return msg_uuid
 
@@ -778,7 +787,13 @@ INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
 """
 def insert_asscs(conn, msg_uuid, tag_uuids):
     for tag_uuid in tag_uuids:
-        conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
+        try:
+            conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
+        except sqlite3.IntegrityError as e:
+            if 'unique' in str(e).lower():
+                continue
+            else:
+                raise e
     conn.commit()
     return
 
@@ -1281,7 +1296,35 @@ if __name__ == '__main__':
         sys.exit()
 
     if args.note_file_in:
-        pass
+        with open(args.note_file_in, 'r') as infile:
+            reader = csv.DictReader(infile)
+            for row in reader:
+                note = Note(**row)
+                note = note._replace(uuid=uuid.UUID(note.uuid))
+                tags = note.tags.split(',')
+
+                if msg_exists(conn, note.uuid):
+                    print('UPDATE')
+                    # Update
+                    update_msg(conn, note.uuid, note.body)
+                else:
+                    print('INSERT')
+                    # Insert
+                    msg_uuid = insert_msg(
+                        conn,
+                        note.body,
+                        msg_uuid=note.uuid,
+                        created_at=note.created_at,
+                    )
+
+                    body_snippet = note.body[:16].replace('\n', '\\n')
+                    print(f"{body_snippet}, {note.created_at}, ({tags})")
+
+                tag_uuids = insert_tags(conn, tags)
+                insert_asscs(conn, note.uuid, tag_uuids)
+
+        print(f" - Imported all notes from {args.note_file_in}")
+        sys.exit()
 
     if args.tag_file_out:
         pass
