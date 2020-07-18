@@ -845,6 +845,17 @@ def remove_tag_relation(conn, explicit, implicit):
     return result.rowcount == 1
 
 
+SELECT_TAG_RELATIONS_ALL = """
+SELECT t1.tag AS tag_direct, t2.tag AS tag_indirect
+FROM tag_relations tr
+INNER JOIN tags t1 ON t1.uuid = tr.tag_uuid
+INNER JOIN tags t2 ON t2.uuid = tr.tag_uuid_denoted;
+"""
+def select_related_tags_all(conn):
+    cursor = conn.execute(SELECT_TAG_RELATIONS_ALL)
+    return [row for row in cursor.fetchall()]
+
+
 SELECT_TAG_RELATIONS = """
 WITH RECURSIVE relations (tag, tag_uuid, tag_uuid_denoted) AS (
   SELECT tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
@@ -1239,7 +1250,7 @@ class LogDiff:
 # -----------------------------------------------------------------------------
 
 def handle_tag_associate(conn, to_associate):
-    for explicit, implicit in (args.tag_associate or []):
+    for explicit, implicit in to_associate:
         try:
             insert_tag_relation(conn, explicit, implicit)
         except LgdException as e:
@@ -1254,7 +1265,7 @@ def handle_tag_associate(conn, to_associate):
 
 
 def handle_tag_disassociate(conn, to_disassociate):
-    for explicit, implicit in (args.tag_disassociate or []):
+    for explicit, implicit in to_disassociate:
         try:
             removed = remove_tag_relation(conn, explicit, implicit)
         except LgdException as e:
@@ -1327,10 +1338,21 @@ if __name__ == '__main__':
         sys.exit()
 
     if args.tag_file_out:
-        pass
+        tag_relations = select_related_tags_all(conn)
+        with open(args.tag_file_out, 'w') as out:
+            writer = csv.writer(out)
+            writer.writerow(('tag_direct', 'tag_indirect'))
+            writer.writerows(tag_relations)
+        print(f" - Exported all tag relations to {args.tag_file_out}")
+        sys.exit()
 
     if args.tag_file_in:
-        pass
+        with open(args.tag_file_in, 'r') as infile:
+            reader = csv.DictReader(infile)
+            for row in reader:
+                handle_tag_associate(conn, ((row['tag_direct'], row['tag_indirect']),))
+        print(f" - Imported tag relations from {args.tag_file_in}")
+        sys.exit()
 
     if args.tag_stats:
         stats = format_tag_statistics(tag_statistics(conn))
