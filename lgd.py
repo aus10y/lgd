@@ -16,7 +16,7 @@ from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
 from subprocess import call
-from typing import List, Set
+from typing import List, Set, Tuple
 
 
 EDITOR = os.environ.get('EDITOR', 'vim')
@@ -1283,6 +1283,7 @@ def handle_tag_disassociate(conn, to_disassociate):
 
 def note_export(conn, outfile):
     notes = messages_with_tags(conn, None)
+
     writer = csv.DictWriter(outfile, Note._fields)
     writer.writeheader()
     for note in notes:
@@ -1290,8 +1291,13 @@ def note_export(conn, outfile):
         note = note._replace(tags=','.join(note.tags))
         writer.writerow(note._asdict())
 
+    return len(notes)
 
-def note_import(conn, infile):
+
+def note_import(conn, infile) -> Tuple[int, int]:
+    inserted = 0
+    updated = 0
+
     reader = csv.DictReader(infile)
     for row in reader:
         note = Note(**row)
@@ -1300,7 +1306,7 @@ def note_import(conn, infile):
 
         if msg_exists(conn, note.uuid):
             # Update
-            update_msg(conn, note.uuid, note.body)
+            updated += int(update_msg(conn, note.uuid, note.body))
         else:
             # Insert
             _ = insert_msg(
@@ -1309,12 +1315,12 @@ def note_import(conn, infile):
                 msg_uuid=note.uuid,
                 created_at=note.created_at,
             )
-
-            # body_snippet = note.body[:16].replace('\n', '\\n')
-            # print(f"{body_snippet}, {note.created_at}, ({tags})")
+            inserted += 1
 
         tag_uuids = insert_tags(conn, tags)
         insert_asscs(conn, note.uuid, tag_uuids)
+
+    return (inserted, updated)
 
 
 # -----------------------------------------------------------------------------
@@ -1332,14 +1338,14 @@ if __name__ == '__main__':
 
     if args.note_file_out:
         with open(args.note_file_out, 'w') as outfile:
-            note_export(conn, outfile)
-        print(f" - Exported all note data to {args.note_file_out}")
+            num = note_export(conn, outfile)
+        print(f" - Exported {num} notes to {args.note_file_out}")
         sys.exit()
 
     if args.note_file_in:
         with open(args.note_file_in, 'r') as infile:
-            note_import(conn, infile)
-        print(f" - Imported all notes from {args.note_file_in}")
+            inserted, updated = note_import(conn, infile)
+        print(f" - Inserted {inserted}, updated {updated} notes from {args.note_file_in}")
         sys.exit()
 
     if args.tag_file_out:
