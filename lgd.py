@@ -802,19 +802,21 @@ def insert_asscs(conn, msg_uuid, tag_uuids):
 INSERT_TAG_RELATION = """
 INSERT INTO tag_relations (tag_uuid, tag_uuid_denoted) VALUES (?, ?);
 """
-def insert_tag_relation(conn, explicit, implicit):
+def insert_tag_relation(conn, explicit, implicit, quiet=False):
     tags = select_tags(conn, (explicit, implicit))
     tags = {t[TAG]: t[ID] for t in tags}
 
     if explicit not in tags:
         explicit_uuid = insert_tags(conn, (explicit,)).pop()
-        print(f"- Inserted '{explicit}' tag'")
+        if not quiet:
+            print(f"- Inserted '{explicit}' tag'")
     else:
         explicit_uuid = tags[explicit]
 
     if implicit not in tags:
         implicit_uuid = insert_tags(conn, (implicit,)).pop()
-        print(f"- Inserted '{implicit}' tag'")
+        if not quiet:
+            print(f"- Inserted '{implicit}' tag'")
     else:
         implicit_uuid = tags[implicit]
 
@@ -851,7 +853,7 @@ FROM tag_relations tr
 INNER JOIN tags t1 ON t1.uuid = tr.tag_uuid
 INNER JOIN tags t2 ON t2.uuid = tr.tag_uuid_denoted;
 """
-def select_related_tags_all(conn):
+def select_related_tags_all(conn) -> List:
     cursor = conn.execute(SELECT_TAG_RELATIONS_ALL)
     return [row for row in cursor.fetchall()]
 
@@ -1249,19 +1251,24 @@ class LogDiff:
 
 # -----------------------------------------------------------------------------
 
-def handle_tag_associate(conn, to_associate):
+def handle_tag_associate(conn, to_associate, quiet=False) -> Tuple[int, int]:
+    inserted, existing = 0, 0
     for explicit, implicit in to_associate:
         try:
-            insert_tag_relation(conn, explicit, implicit)
+            insert_tag_relation(conn, explicit, implicit, quiet=True)
         except LgdException as e:
             print(Term.warning(str(e)))
         except sqlite3.IntegrityError as e:
-            if 'unique' in str(e).lower():
+            existing += 1
+            if 'unique' in str(e).lower() and not quiet:
                 print(Term.warning(
                     f"Tag relation '{explicit}' -> '{implicit}' already exists!"
                 ))
         else:
-            print(Term.green(f"Created '{explicit}' -> '{implicit}' relation"))
+            inserted += 1
+            if not quiet:
+                print(Term.green(f"Created '{explicit}' -> '{implicit}' relation"))
+    return (inserted, existing)
 
 
 def handle_tag_disassociate(conn, to_disassociate):
@@ -1323,6 +1330,20 @@ def note_import(conn, infile) -> Tuple[int, int]:
     return (inserted, updated)
 
 
+def tag_export(conn, outfile) -> int:
+    tag_relations = select_related_tags_all(conn)
+    writer = csv.writer(outfile)
+    writer.writerow(('tag_direct', 'tag_indirect'))
+    writer.writerows(tag_relations)
+    return len(tag_relations)
+
+
+def tag_import(conn, infile) -> Tuple[int, int]:
+    reader = csv.DictReader(infile)
+    relations = ((row['tag_direct'], row['tag_indirect']) for row in reader)
+    return handle_tag_associate(conn, relations, quiet=True)
+
+
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
@@ -1349,20 +1370,16 @@ if __name__ == '__main__':
         sys.exit()
 
     if args.tag_file_out:
-        tag_relations = select_related_tags_all(conn)
-        with open(args.tag_file_out, 'w') as out:
-            writer = csv.writer(out)
-            writer.writerow(('tag_direct', 'tag_indirect'))
-            writer.writerows(tag_relations)
-        print(f" - Exported all tag relations to {args.tag_file_out}")
+        with open(args.tag_file_out, 'w') as outfile:
+            num = tag_export(conn, outfile)
+        print(f" - Exported {num} tag relations to {args.tag_file_out}")
         sys.exit()
 
     if args.tag_file_in:
         with open(args.tag_file_in, 'r') as infile:
-            reader = csv.DictReader(infile)
-            for row in reader:
-                handle_tag_associate(conn, ((row['tag_direct'], row['tag_indirect']),))
-        print(f" - Imported tag relations from {args.tag_file_in}")
+            inserted, existing = tag_import(conn, infile)
+            total = inserted + existing
+        print(f" - Inserted {inserted} of {total} relations from {args.tag_file_in}")
         sys.exit()
 
     if args.tag_stats:
