@@ -1281,6 +1281,16 @@ def handle_tag_disassociate(conn, to_disassociate):
                 ))
 
 
+def note_export(conn, outfile):
+    notes = messages_with_tags(conn, None)
+    writer = csv.DictWriter(outfile, Note._fields)
+    writer.writeheader()
+    for note in notes:
+        # For the CSV file, for the tags to be a comma separated str.
+        note = note._replace(tags=','.join(note.tags))
+        writer.writerow(note._asdict())
+
+
 def note_import(conn, infile):
     reader = csv.DictReader(infile)
     for row in reader:
@@ -1321,14 +1331,8 @@ if __name__ == '__main__':
         sys.exit()
 
     if args.note_file_out:
-        notes = messages_with_tags(conn, None)
-        with open(args.note_file_out, 'w') as out:
-            writer = csv.DictWriter(out, Note._fields)
-            writer.writeheader()
-            for note in notes:
-                # For the CSV file, for the tags to be a comma separated str.
-                note = note._replace(tags=','.join(note.tags))
-                writer.writerow(note._asdict())
+        with open(args.note_file_out, 'w') as outfile:
+            note_export(conn, outfile)
         print(f" - Exported all note data to {args.note_file_out}")
         sys.exit()
 
