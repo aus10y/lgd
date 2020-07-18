@@ -1281,6 +1281,32 @@ def handle_tag_disassociate(conn, to_disassociate):
                 ))
 
 
+def note_import(conn, infile):
+    reader = csv.DictReader(infile)
+    for row in reader:
+        note = Note(**row)
+        note = note._replace(uuid=uuid.UUID(note.uuid))
+        tags = note.tags.split(',')
+
+        if msg_exists(conn, note.uuid):
+            # Update
+            update_msg(conn, note.uuid, note.body)
+        else:
+            # Insert
+            _ = insert_msg(
+                conn,
+                note.body,
+                msg_uuid=note.uuid,
+                created_at=note.created_at,
+            )
+
+            # body_snippet = note.body[:16].replace('\n', '\\n')
+            # print(f"{body_snippet}, {note.created_at}, ({tags})")
+
+        tag_uuids = insert_tags(conn, tags)
+        insert_asscs(conn, note.uuid, tag_uuids)
+
+
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
@@ -1308,32 +1334,7 @@ if __name__ == '__main__':
 
     if args.note_file_in:
         with open(args.note_file_in, 'r') as infile:
-            reader = csv.DictReader(infile)
-            for row in reader:
-                note = Note(**row)
-                note = note._replace(uuid=uuid.UUID(note.uuid))
-                tags = note.tags.split(',')
-
-                if msg_exists(conn, note.uuid):
-                    print('UPDATE')
-                    # Update
-                    update_msg(conn, note.uuid, note.body)
-                else:
-                    print('INSERT')
-                    # Insert
-                    msg_uuid = insert_msg(
-                        conn,
-                        note.body,
-                        msg_uuid=note.uuid,
-                        created_at=note.created_at,
-                    )
-
-                    body_snippet = note.body[:16].replace('\n', '\\n')
-                    print(f"{body_snippet}, {note.created_at}, ({tags})")
-
-                tag_uuids = insert_tags(conn, tags)
-                insert_asscs(conn, note.uuid, tag_uuids)
-
+            note_import(conn, infile)
         print(f" - Imported all notes from {args.note_file_in}")
         sys.exit()
 
