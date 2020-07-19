@@ -532,7 +532,7 @@ def format_tag_statistics(stats):
 
 
 def split_tags(tags: str) -> list:
-    return set(t.strip() for t in tags.split(','))
+    return frozenset(t.strip() for t in tags.split(','))
 
 
 def rows_to_notes(rows):
@@ -609,7 +609,7 @@ WHERE logs.uuid in (
 SELECT_LOGS_WITH_TAGS_ALL_TEMPL = """
 SELECT
     logs.uuid AS uuid,
-    datetime(logs.created_at, 'localtime') AS created_at,
+    datetime(logs.created_at{datetime_modifier}) AS created_at,
     logs.msg AS body,
     group_concat(tags.tag) AS tags
 FROM logs
@@ -622,7 +622,7 @@ ORDER BY logs.created_at;
 SELECT_LOGS_AND_TAGS_TEMPL = """
 SELECT
     logs.uuid AS uuid,
-    datetime(logs.created_at, 'localtime') AS created_at,
+    datetime(logs.created_at{datetime_modifier}) AS created_at,
     logs.msg AS body,
     group_concat(tags.tag) AS tags
 FROM logs
@@ -671,17 +671,20 @@ def _msg_uuids_having_tags(conn, tag_groups, date_range=None) -> Set[uuid.UUID]:
     return msg_uuids
 
 
-def messages_with_tags(conn, tag_groups, date_range=None) -> List[Note]:
+def messages_with_tags(conn, tag_groups, date_range=None, localtime=True) -> List[Note]:
     if not tag_groups or ((len(tag_groups) == 1) and not tag_groups[0]):
         select = SELECT_LOGS_WITH_TAGS_ALL_TEMPL.format(
-            date_range=_format_date_range('logs.created_at', date_range))
+            date_range=_format_date_range('logs.created_at', date_range),
+            datetime_modifier=", 'localtime'" if localtime else '',
+        )
         cursor = conn.execute(select)
     else:
         msg_uuids = _msg_uuids_having_tags(
             conn, tag_groups, date_range=date_range
         )
         select = SELECT_LOGS_AND_TAGS_TEMPL.format(
-            msgs=', '.join('?' for _ in msg_uuids)
+            msgs=', '.join('?' for _ in msg_uuids),
+            datetime_modifier=", 'localtime'" if localtime else '',
         )
         cursor = conn.execute(select, tuple(msg_uuids))
 
@@ -1289,7 +1292,7 @@ def handle_tag_disassociate(conn, to_disassociate):
 
 
 def note_export(conn, outfile):
-    notes = messages_with_tags(conn, None)
+    notes = messages_with_tags(conn, None, localtime=False)
 
     writer = csv.DictWriter(outfile, Note._fields)
     writer.writeheader()
