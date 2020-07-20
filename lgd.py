@@ -230,15 +230,18 @@ CREATE TABLE IF NOT EXISTS logs (
     msg GZIP NOT NULL
 );
 """
+
 CREATE_TAGS_TABLE = """
 CREATE TABLE IF NOT EXISTS tags (
     uuid UUID PRIMARY KEY,
     tag TEXT NOT NULL UNIQUE
 );
 """
+
 CREATE_TAG_INDEX = """
 CREATE INDEX IF NOT EXISTS tag_index ON tags (tag);
 """
+
 CREATE_ASSOC_TABLE = """
 CREATE TABLE IF NOT EXISTS logs_tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,12 +252,15 @@ CREATE TABLE IF NOT EXISTS logs_tags (
     UNIQUE(log_uuid, tag_uuid)
 );
 """
+
 CREATE_ASSC_LOGS_INDEX = """
 CREATE INDEX IF NOT EXISTS assc_log_index ON logs_tags (log_uuid);
 """
+
 CREATE_ASSC_TAGS_INDEX = """
 CREATE INDEX IF NOT EXISTS assc_tag_index ON logs_tags (tag_uuid);
 """
+
 CREATE_TAG_RELATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS tag_relations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -555,13 +561,14 @@ class LgdException(Exception):
     pass
 
 
-## Log / Message related
+# Log / Message related
 
 INSERT_LOG = """
 INSERT into logs (uuid, created_at, msg) VALUES (?, {timestamp}, ?);
 """
 
-def insert_msg(conn, msg, msg_uuid=None, created_at=None):
+
+def insert_msg(conn, msg, msg_uuid: uuid.UUID = None, created_at=None) -> uuid.UUID:
     msg_uuid = uuid.uuid4() if msg_uuid is None else msg_uuid
 
     if created_at is None:
@@ -580,7 +587,8 @@ UPDATE_LOG = """
 UPDATE logs SET msg = ? WHERE uuid = ?
 """
 
-def update_msg(conn, msg_uuid, msg):
+
+def update_msg(conn, msg_uuid, msg) -> bool:
     c = conn.execute(UPDATE_LOG, (Gzip(msg), msg_uuid))
     return c.rowcount == 1
 
@@ -588,9 +596,11 @@ def update_msg(conn, msg_uuid, msg):
 AND_DATE_BETWEEN_TEMPL = """
  AND ({ranges})
 """
+
 _DATE_BETWEEN_FRAGMENT = """
 ({column} BETWEEN '{begin}' AND '{end}')
 """
+
 SELECT_LOGS_HAVING_TAGS_TEMPL = """
 SELECT logs.uuid
 FROM logs
@@ -606,6 +616,7 @@ WHERE logs.uuid in (
     HAVING COUNT(tag_uuid) >= ?
 ){date_range};
 """
+
 SELECT_LOGS_WITH_TAGS_ALL_TEMPL = """
 SELECT
     logs.uuid AS uuid,
@@ -619,6 +630,7 @@ WHERE 1{date_range}
 GROUP BY logs.uuid, logs.created_at, logs.msg
 ORDER BY logs.created_at;
 """
+
 SELECT_LOGS_AND_TAGS_TEMPL = """
 SELECT
     logs.uuid AS uuid,
@@ -634,7 +646,7 @@ ORDER BY logs.created_at;
 """
 
 
-def _format_date_range(column, date_ranges):
+def _format_date_range(column, date_ranges) -> str:
     if not date_ranges:
         return ''
 
@@ -649,7 +661,7 @@ def _format_date_range(column, date_ranges):
     return AND_DATE_BETWEEN_TEMPL.format(ranges=ranges)
 
 
-def format_template_tags_dates(template, tags, date_col, date_range):
+def format_template_tags_dates(template: str, tags, date_col, date_range) -> str:
     tags = ', '.join('?' for _ in tags)
     dates = _format_date_range(date_col, date_range)
     return template.format(tags=tags, date_range=dates)
@@ -691,18 +703,18 @@ def messages_with_tags(conn, tag_groups, date_range=None, localtime=True) -> Lis
     return list(rows_to_notes(cursor.fetchall()))
 
 
-def msg_exists(conn, msg_uuid):
+def msg_exists(conn, msg_uuid) -> bool:
     sql = 'SELECT uuid from logs where uuid = ?;'
     return conn.execute(sql, (msg_uuid,)).fetchone() is not None
 
 
-def select_msgs_from_uuid_prefix(conn, uuid_prefix):
+def select_msgs_from_uuid_prefix(conn, uuid_prefix) -> List:
     uuid_prefix += '%'
     sql = "SELECT * from logs where hex(uuid) like ?;"
     return list(conn.execute(sql, (uuid_prefix,)).fetchall())
 
 
-def delete_msg(conn, msg_uuid, commit=True):
+def delete_msg(conn, msg_uuid, commit=True) -> bool:
     """Delete the message with the given UUID.
 
     propagate: If `True` (default), delete the associates to tags,
@@ -719,9 +731,10 @@ def delete_msg(conn, msg_uuid, commit=True):
 
     return True
 
-## Tags
 
-def delete_tag(conn, tag, commit=True):
+# Tags
+
+def delete_tag(conn, tag, commit=True) -> bool:
     """Delete the tag with the given value.
 
     propagate: If `True` (default), delete the associates to logs,
@@ -763,6 +776,8 @@ def select_tags(conn, tags: list):
 INSERT_TAG = """
 INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
 """
+
+
 def insert_tags(conn, tags):
     tag_uuids = set()
     for tag in tags:
@@ -783,11 +798,13 @@ def select_all_tags(conn):
     return [r[0] for r in c.fetchall()]
 
 
-## Log-Tag associations
+# Log-Tag associations
 
 INSERT_LOG_TAG_ASSC = """
 INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
 """
+
+
 def insert_asscs(conn, msg_uuid, tag_uuids):
     for tag_uuid in tag_uuids:
         try:
@@ -800,11 +817,14 @@ def insert_asscs(conn, msg_uuid, tag_uuids):
     conn.commit()
     return
 
-## Tag Relations
+
+# Tag Relations
 
 INSERT_TAG_RELATION = """
 INSERT INTO tag_relations (tag_uuid, tag_uuid_denoted) VALUES (?, ?);
 """
+
+
 def insert_tag_relation(conn, explicit, implicit, quiet=False):
     tags = select_tags(conn, (explicit, implicit))
     tags = {t[TAG]: t[ID] for t in tags}
@@ -832,7 +852,9 @@ def insert_tag_relation(conn, explicit, implicit, quiet=False):
 REMOVE_TAG_RELATION = """
 DELETE from tag_relations WHERE tag_uuid = ? AND tag_uuid_denoted = ?;
 """
-def remove_tag_relation(conn, explicit, implicit):
+
+
+def remove_tag_relation(conn, explicit, implicit) -> bool:
     tags = select_tags(conn, (explicit, implicit))
     tags = {t[TAG]: t[ID] for t in tags}
 
@@ -856,6 +878,8 @@ FROM tag_relations tr
 INNER JOIN tags t1 ON t1.uuid = tr.tag_uuid
 INNER JOIN tags t2 ON t2.uuid = tr.tag_uuid_denoted;
 """
+
+
 def select_related_tags_all(conn) -> List:
     cursor = conn.execute(SELECT_TAG_RELATIONS_ALL)
     return [row for row in cursor.fetchall()]
@@ -878,6 +902,8 @@ WITH RECURSIVE relations (tag, tag_uuid, tag_uuid_denoted) AS (
 )
 SELECT tag from relations;
 """
+
+
 def select_related_tags(conn, tag):
     """Select tags associated with the given tag."""
     tags = {tag}
@@ -957,6 +983,7 @@ LEFT JOIN
 GROUP BY t1.tag
 ORDER BY implied DESC, direct DESC, t1.tag ASC;
 """
+
 
 def tag_statistics(conn):
     with conn:
@@ -1274,7 +1301,7 @@ def handle_tag_associate(conn, to_associate, quiet=False) -> Tuple[int, int]:
     return (inserted, existing)
 
 
-def handle_tag_disassociate(conn, to_disassociate):
+def handle_tag_disassociate(conn, to_disassociate) -> None:
     for explicit, implicit in to_disassociate:
         try:
             removed = remove_tag_relation(conn, explicit, implicit)
@@ -1291,7 +1318,7 @@ def handle_tag_disassociate(conn, to_disassociate):
                 ))
 
 
-def note_export(conn, outfile):
+def note_export(conn, outfile) -> int:
     notes = messages_with_tags(conn, None, localtime=False)
 
     writer = csv.DictWriter(outfile, Note._fields)
