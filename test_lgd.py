@@ -18,7 +18,7 @@ DB_IN_MEM = ":memory:"
 
 def tag_factory(num):
     return [
-        ''.join(random.choices(string.ascii_letters, k=random.randrange(3, 10)))
+        "".join(random.choices(string.ascii_letters, k=random.randrange(3, 10)))
         for _ in range(num)
     ]
 
@@ -28,7 +28,7 @@ def tag_relation_factory(tags, num):
 
 
 def body_factory():
-    return ''.join(random.choices(string.printable, k=random.randrange(20, 100)))
+    return "".join(random.choices(string.printable, k=random.randrange(20, 100)))
 
 
 def date_factory(multiple=1):
@@ -59,7 +59,7 @@ def note_csv_factory(notes):
     writer.writeheader()
     for note in notes:
         # For the CSV file, for the tags to be a comma separated str.
-        note = note._replace(tags=','.join(note.tags))
+        note = note._replace(tags=",".join(note.tags))
         writer.writerow(note._asdict())
     outfile.seek(0)
     return outfile
@@ -68,7 +68,7 @@ def note_csv_factory(notes):
 def tag_csv_factory(tag_relations):
     outfile = io.StringIO()
     writer = csv.writer(outfile)
-    writer.writerow(('tag_direct', 'tag_indirect'))
+    writer.writerow(("tag_direct", "tag_indirect"))
     writer.writerows(tag_relations)
     outfile.seek(0)
     return outfile
@@ -92,7 +92,6 @@ _TAG_CSV = tag_csv_factory(TAG_RELATIONS)
 
 
 class TestFlattenTagGroups(unittest.TestCase):
-
     def test_no_groups(self):
         self.assertEqual([], lgd.flatten_tag_groups([]))
 
@@ -100,53 +99,38 @@ class TestFlattenTagGroups(unittest.TestCase):
         self.assertEqual([], lgd.flatten_tag_groups([[]]))
 
     def test_single_group(self):
-        self.assertEqual(
-            ['a'],
-            lgd.flatten_tag_groups([['a']])
-        )
-        self.assertEqual(
-            ['a', 'b', 'c'],
-            lgd.flatten_tag_groups([['a', 'b', 'c']])
-        )
+        self.assertEqual(["a"], lgd.flatten_tag_groups([["a"]]))
+        self.assertEqual(["a", "b", "c"], lgd.flatten_tag_groups([["a", "b", "c"]]))
 
     def test_multiple_groups(self):
         self.assertEqual(
-            ['a', 'b', 'c', 'd'],
-            lgd.flatten_tag_groups([['a', 'b'], ['c', 'd']])
+            ["a", "b", "c", "d"], lgd.flatten_tag_groups([["a", "b"], ["c", "d"]])
         )
 
 
 class TestGzip(unittest.TestCase):
-
     def setUp(self):
         self.text = "The quick brown fox jumps over the lazy dog"
-        self.data = gzip.compress(self.text.encode('utf8'))
+        self.data = gzip.compress(self.text.encode("utf8"))
 
     def test_compress_string(self):
         compressed = lgd.Gzip.compress_string(self.text)
 
         self.assertIsInstance(compressed, bytes)
-        self.assertEqual(
-            self.text,
-            gzip.decompress(compressed).decode('utf8')
-        )
+        self.assertEqual(self.text, gzip.decompress(compressed).decode("utf8"))
 
     def test_decompress_string(self):
         decompressed = lgd.Gzip.decompress_string(self.data)
 
         self.assertIsInstance(decompressed, str)
-        self.assertEqual(
-            self.text,
-            decompressed
-        )
+        self.assertEqual(self.text, decompressed)
 
     def test_col_type(self):
-        self.assertTrue(hasattr(lgd.Gzip, 'COL_TYPE'))
-        self.assertEqual(lgd.Gzip.COL_TYPE, 'GZIP')
+        self.assertTrue(hasattr(lgd.Gzip, "COL_TYPE"))
+        self.assertEqual(lgd.Gzip.COL_TYPE, "GZIP")
 
 
 class TestDBSetup(unittest.TestCase):
-
     def setUp(self):
         self.conn = lgd.get_connection(DB_IN_MEM)
 
@@ -168,21 +152,19 @@ class TestDBSetup(unittest.TestCase):
         def raise_err(err):
             raise err
 
-        migrations = [
-            (1, lambda c: raise_err(sqlite3.Error))
-        ]
+        migrations = [(1, lambda c: raise_err(sqlite3.Error))]
 
         success = lgd.db_setup(self.conn, migrations)
         self.assertFalse(success, "db_setup failed to catch migration failure")
 
     def test_migration_intermediate(self):
-        BAD_TABLE = 'fail'
+        BAD_TABLE = "fail"
 
         def bad_migration(conn):
             conn.execute(f"CREATE TABLE {BAD_TABLE} (id INT PRIMARY KEY, data BLOB);")
             conn.execute(f"INSERT INTO {BAD_TABLE} (id, data) VALUES (1, 'abcd');")
             cursor = conn.execute("SELECT * FROM fail WHERE id = ?", (1,))
-            self.assertEqual(cursor.fetchone()[1], 'abcd')
+            self.assertEqual(cursor.fetchone()[1], "abcd")
             raise sqlite3.Error
 
         def good_migration(conn):
@@ -207,7 +189,7 @@ class TestDBSetup(unittest.TestCase):
 
         cursor = self.conn.execute(
             "SELECT count(*) FROM sqlite_master WHERE type='table' and name = ?",
-            (BAD_TABLE,)
+            (BAD_TABLE,),
         )
         count = cursor.fetchone()[0]
         table_exists = bool(count)
@@ -228,7 +210,6 @@ class TestDBSetup(unittest.TestCase):
 
 
 class TestDBNotes(unittest.TestCase):
-
     def setUp(self):
         self.conn = lgd.get_connection(DB_IN_MEM)
         lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
@@ -238,7 +219,6 @@ class TestDBNotes(unittest.TestCase):
 
 
 class TestCSVNoteInsert(unittest.TestCase):
-
     def setUp(self):
         self.conn = lgd.get_connection(DB_IN_MEM)
         lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
@@ -253,7 +233,6 @@ class TestCSVNoteInsert(unittest.TestCase):
 
 
 class TestCSVNoteUpdate(unittest.TestCase):
-
     def setUp(self):
         self.conn = lgd.get_connection(DB_IN_MEM)
         lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
@@ -264,11 +243,10 @@ class TestCSVNoteUpdate(unittest.TestCase):
         self.assertEqual(inserted + updated, len(NOTES))
         self.assertEqual(inserted, 0)
         self.assertEqual(updated, self.inserted)
-        self.assertEqual(updated, len(NOTES), f'Number updated: {updated}')
+        self.assertEqual(updated, len(NOTES), f"Number updated: {updated}")
 
 
 class TestCSVNoteExport(unittest.TestCase):
-
     def setUp(self):
         self.conn = lgd.get_connection(DB_IN_MEM)
         lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
@@ -305,7 +283,6 @@ class TestCSVNoteExport(unittest.TestCase):
 
 
 class TestCSVTagImportExport(unittest.TestCase):
-
     def setUp(self):
         self.conn = lgd.get_connection(DB_IN_MEM)
         lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
@@ -348,5 +325,5 @@ class TestCSVTagImportExport(unittest.TestCase):
         self.assertEqual(tag_relations1, tag_relations2)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
