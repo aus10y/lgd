@@ -518,7 +518,7 @@ class Gzip(str):
         return gzip.decompress(msg_bytes).decode("utf8")
 
 
-def flatten_tag_groups(tag_groups: Tuple[Tuple[str, ...]]) -> List[str]:
+def flatten_tag_groups(tag_groups: Iterable[Tuple[str, ...]]) -> List[str]:
     tags = []
     for group in tag_groups:
         tags.extend(group)
@@ -1087,16 +1087,21 @@ def tag_statistics(conn: sqlite3.Connection) -> sqlite3.Cursor:
 
 class RenderedLog:
     def __init__(
-        self, notes: Iterable[Note], tags: List[Tuple[str, ...]], style: bool = True
+        self,
+        notes: Iterable[Note],
+        tag_groups: List[Tuple[str, ...]],
+        expanded_tag_groups: List[Tuple[str, ...]],
+        style: bool = True,
     ):
         """
         logs: A list/tuple, of 2-tuples (uuid, message)
         tags: The tags used to find the given logs. A list of lists of tags.
         """
         self.notes = list(notes)
-        self.tag_groups = list(tags) if tags else tuple()
+        self.tag_groups = tag_groups
+        self.expanded_tag_groups = expanded_tag_groups
+        self._tags_flat = flatten_tag_groups(tag_groups)
         self._styled = style
-        self._all_tags = flatten_tag_groups(self.tag_groups)
         self._lines = []
         self._line_map = []
         self._render(style)  # Set up self._lines and self._lines_map
@@ -1104,7 +1109,7 @@ class RenderedLog:
     def _render(self, style: bool):
         # Header
         if style and self.tag_groups:
-            self._lines.append(RenderedLog._editor_header(self.tag_groups))
+            self._lines.append(RenderedLog._editor_header(self.expanded_tag_groups))
 
         # Body
         linenum_init, linenum_last = None, None
@@ -1127,7 +1132,7 @@ class RenderedLog:
 
         # Footer
         if style:
-            self._lines.extend(RenderedLog._editor_footer(set(self._all_tags)))
+            self._lines.extend(RenderedLog._editor_footer(set(self._tags_flat)))
 
     @staticmethod
     def _editor_header(tag_groups: List[Tuple[str, ...]]):
@@ -1289,11 +1294,11 @@ class RenderedLog:
             diff_index += advance
 
             # TODO: Refactor LogDiff so that lines are iteratively given to it.
-            log_diffs.append(LogDiff(msg_uuid, msg_diff, tags=self._all_tags))
+            log_diffs.append(LogDiff(msg_uuid, msg_diff, tags=self._tags_flat))
             msg_diff = []
 
         # New msg
-        new_tags = self._all_tags
+        new_tags = self._tags_flat
         for line_num, text in diff[diff_index:]:
             RenderedLog._print_diff_info(line_num, None, None, None, text, debug=debug)
             if RenderedLog._is_new_tag_line(text):
@@ -1576,12 +1581,12 @@ if __name__ == "__main__":
 
     # Display messages
     if args.tags or args.date_ranges:
-        tag_groups = [tg for tg in args.tags if tg]
+        tag_groups = [tg for tg in (args.tags or []) if tg]
         expanded_tag_groups = expand_tag_groups(conn, tag_groups)
 
         messages = messages_with_tags(conn, expanded_tag_groups, args.date_ranges)
         message_view = RenderedLog(
-            messages, expanded_tag_groups, style=(not args.plain)
+            messages, tag_groups, expanded_tag_groups, style=(not args.plain)
         )
         edited = open_temp_logfile(message_view.rendered)
         diffs = message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
