@@ -17,7 +17,17 @@ from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
 from subprocess import call
-from typing import Callable, FrozenSet, Iterable, List, Pattern, Set, Tuple, Union
+from typing import (
+    Callable,
+    FrozenSet,
+    Generator,
+    Iterable,
+    List,
+    Pattern,
+    Set,
+    Tuple,
+    Union,
+)
 
 
 EDITOR = os.environ.get("EDITOR", "vim")
@@ -508,7 +518,7 @@ class Gzip(str):
         return gzip.decompress(msg_bytes).decode("utf8")
 
 
-def flatten_tag_groups(tag_groups: Tuple[Tuple[str, ...]]) -> List:
+def flatten_tag_groups(tag_groups: Tuple[Tuple[str, ...]]) -> List[str]:
     tags = []
     for group in tag_groups:
         tags.extend(group)
@@ -758,7 +768,10 @@ def _msg_uuids_having_tags(
 
 
 def messages_with_tags(
-    conn: sqlite3.Connection, tag_groups, date_range=None, localtime=True
+    conn: sqlite3.Connection,
+    tag_groups: List[Tuple[str, ...]],
+    date_range=None,
+    localtime=True,
 ) -> List[Note]:
     if not tag_groups or ((len(tag_groups) == 1) and not tag_groups[0]):
         select = SELECT_LOGS_WITH_TAGS_ALL_TEMPL.format(
@@ -992,7 +1005,7 @@ def select_related_tags(conn: sqlite3.Connection, tag):
     return tags
 
 
-def expand_tag_groups(conn: sqlite3.Connection, tag_groups):
+def expand_tag_groups(conn: sqlite3.Connection, tag_groups) -> List[Tuple[str, ...]]:
     """
     Given a set of "tag groups" (a list of lists of tags), expand those tags to
     include related tags, while maintaing the appropriate AND and OR
@@ -1073,7 +1086,9 @@ def tag_statistics(conn: sqlite3.Connection) -> sqlite3.Cursor:
 
 
 class RenderedLog:
-    def __init__(self, notes, tags, style=True):
+    def __init__(
+        self, notes: Iterable[Note], tags: List[Tuple[str, ...]], style: bool = True
+    ):
         """
         logs: A list/tuple, of 2-tuples (uuid, message)
         tags: The tags used to find the given logs. A list of lists of tags.
@@ -1086,7 +1101,7 @@ class RenderedLog:
         self._line_map = []
         self._render(style)  # Set up self._lines and self._lines_map
 
-    def _render(self, style):
+    def _render(self, style: bool):
         # Header
         if style and self.tag_groups:
             self._lines.append(RenderedLog._editor_header(self.tag_groups))
@@ -1115,7 +1130,7 @@ class RenderedLog:
             self._lines.extend(RenderedLog._editor_footer(set(self._all_tags)))
 
     @staticmethod
-    def _editor_header(tag_groups):
+    def _editor_header(tag_groups: List[Tuple[str, ...]]):
         tag_groups = (", ".join(group) for group in tag_groups)
         tags_together = " || ".join(f"<{tg}>" for tg in tag_groups)
         header = f"# TAGS: {tags_together}\n"
@@ -1138,7 +1153,7 @@ class RenderedLog:
         return ("\n",)
 
     @staticmethod
-    def _editor_footer(tags):
+    def _editor_footer(tags: Iterable[str]):
         footer = (
             f'{79*"-"}\n',
             f"# Enter new log message below\n",
@@ -1152,27 +1167,29 @@ class RenderedLog:
         return self._lines
 
     @staticmethod
-    def _is_addition(line):
+    def _is_addition(line: str) -> bool:
         return line.startswith("+ ")
 
     @staticmethod
-    def _is_removal(line):
+    def _is_removal(line: str) -> bool:
         return line.startswith("- ")
 
     @staticmethod
-    def _is_intraline(line):
+    def _is_intraline(line: str) -> bool:
         return line.startswith("? ")
 
     @staticmethod
-    def _is_emptyline(line):
+    def _is_emptyline(line: str) -> bool:
         return line == "  \n"
 
     @staticmethod
-    def _is_modification(line):
+    def _is_modification(line: str) -> bool:
         return RenderedLog._is_addition(line) or RenderedLog._is_removal(line)
 
     @staticmethod
-    def _enumerate_diff(diff_lines):
+    def _enumerate_diff(
+        diff_lines: Iterable[str],
+    ) -> Generator[Tuple[int, str], None, None]:
         first_line = True
         line_num = 0
 
@@ -1192,31 +1209,35 @@ class RenderedLog:
                     yield (line_num, line)
 
     @staticmethod
-    def _print_diff_info(line_num, msg_uuid, line_from, line_to, text, debug=False):
-        msg_uuid = str(msg_uuid)
-        line_from = str(line_from)
-        line_to = str(line_to)
+    def _print_diff_info(
+        line_num: int,
+        msg_uuid: uuid.UUID,
+        line_from: int,
+        line_to: int,
+        text: str,
+        debug: bool = False,
+    ):
         if debug:
             print(
                 (
-                    f"line: {line_num:>4}, msg_uuid: {msg_uuid},"
-                    f" ({line_from:>4}, {line_to:>4}): {text}"
+                    f"line: {line_num:>4}, msg_uuid: {str(msg_uuid)},"
+                    f" ({str(line_from):>4}, {str(line_to):>4}): {text}"
                 ),
                 end="",
             )
 
     @staticmethod
-    def _is_new_tag_line(line):
+    def _is_new_tag_line(line: str) -> bool:
         TAG_LINE = "+ # Tags:"
         return line.startswith(TAG_LINE)
 
     @staticmethod
-    def _parse_new_tags(line):
+    def _parse_new_tags(line: str) -> List[str]:
         TAG_LINE = "+ # Tags:"
         raw_tags = (t.strip() for t in line[len(TAG_LINE) :].split(","))
         return [t for t in raw_tags if t]
 
-    def diff(self, other, debug=False):
+    def diff(self, other: Iterable[str], debug=False):
         """
         return an iterable of LogDiffs
         """
@@ -1288,7 +1309,12 @@ class RenderedLog:
 
 
 class LogDiff:
-    def __init__(self, msg_uuid, diff_lines, tags=None):
+    def __init__(
+        self,
+        msg_uuid: uuid.UUID,
+        diff_lines: List[str],
+        tags: Union[List[str], None] = None,
+    ):
         """
         mods: iterable of (change, line_num, text)
         """
@@ -1308,13 +1334,13 @@ class LogDiff:
         id_str = str(self.msg_uuid) if not self.is_new else "New"
         return f"<LogDiff({id_str})>\n{str(self)}</LogDiff>"
 
-    def update_or_create(self, conn, commit=True):
+    def update_or_create(self, conn: sqlite3.Connection, commit: bool = True):
         if self.is_new:
             return self._create(conn, commit=commit)
         else:
             return self._update(conn, commit=commit)
 
-    def _create(self, conn, commit=True):
+    def _create(self, conn: sqlite3.Connection, commit: bool = True):
         msg_uuid = insert_msg(conn, self.msg)
         self.msg_uuid = msg_uuid
 
@@ -1326,7 +1352,7 @@ class LogDiff:
 
         return True
 
-    def _update(self, conn, commit=True):
+    def _update(self, conn: sqlite3.Connection, commit: bool = True):
         if not self.modified:
             return False
 
@@ -1348,10 +1374,10 @@ class LogDiff:
 
         return True
 
-    def _update_msg(self, conn):
+    def _update_msg(self, conn: sqlite3.Connection):
         return update_msg(conn, self.msg_uuid, self.msg)
 
-    def _update_diffs(self, conn):
+    def _update_diffs(self, conn: sqlite3.Connection):
         # TODO: Save diff info
         return True
 
@@ -1360,7 +1386,9 @@ class LogDiff:
 
 
 def handle_tag_associate(
-    conn: sqlite3.Connection, to_associate, quiet=False
+    conn: sqlite3.Connection,
+    to_associate: Iterable[Tuple[str, str]],
+    quiet: bool = False,
 ) -> Tuple[int, int]:
     inserted, existing = 0, 0
     for explicit, implicit in to_associate:
@@ -1383,7 +1411,9 @@ def handle_tag_associate(
     return (inserted, existing)
 
 
-def handle_tag_disassociate(conn: sqlite3.Connection, to_disassociate) -> None:
+def handle_tag_disassociate(
+    conn: sqlite3.Connection, to_disassociate: Iterable[List[str]]
+) -> None:
     for explicit, implicit in to_disassociate:
         try:
             removed = remove_tag_relation(conn, explicit, implicit)
