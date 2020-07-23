@@ -130,9 +130,9 @@ parser.add_argument(
         "Show or tag a message or messages with the given tags.\n"
         " Filter messages by adding one or more tags separated by spaces.\n"
         " Matching messages must contain all given tags.\n"
-        " Ex. `-s foo`, `-s foo bar`.\n"
+        " Ex. `-t foo`, `-t foo bar`.\n"
         " Additional flag usage will OR the tag groups together.\n"
-        " Ex. `-s foo bar -s baz`.\n"
+        " Ex. `-t foo bar -t baz`.\n"
     ),
 )
 parser.add_argument(
