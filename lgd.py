@@ -987,8 +987,8 @@ def select_related_tags_all(conn: sqlite3.Connection) -> List[sqlite3.Row]:
 
 
 SELECT_TAG_RELATIONS = """
-WITH RECURSIVE relations (tag, tag_uuid, tag_uuid_denoted) AS (
-  SELECT tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
+WITH RECURSIVE relations (tag, tag_uuid, tag_denoted, tag_uuid_denoted) AS (
+  SELECT tags.tag, tr.tag_uuid, tags_from.tag, tr.tag_uuid_denoted
   FROM tag_relations tr
     INNER JOIN tags as tags_from on tags_from.uuid = tr.tag_uuid_denoted
     INNER JOIN tags on tags.uuid = tr.tag_uuid
@@ -996,16 +996,16 @@ WITH RECURSIVE relations (tag, tag_uuid, tag_uuid_denoted) AS (
 
   UNION
 
-  SELECT tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
+  SELECT tags.tag, tr.tag_uuid, relations.tag, tr.tag_uuid_denoted
   FROM tag_relations tr
     INNER JOIN relations on relations.tag_uuid = tr.tag_uuid_denoted
     INNER JOIN tags on tags.uuid = tr.tag_uuid
 )
-SELECT tag from relations;
+SELECT * from relations;
 """
 
 
-def select_related_tags(conn: sqlite3.Connection, tag):
+def select_related_tags(conn: sqlite3.Connection, tag) -> Set:
     """Select tags associated with the given tag."""
     tags = {tag}
     with conn:
@@ -1464,7 +1464,8 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
     reader = csv.DictReader(infile)
     if set(reader.fieldnames) != set(Note._fields):
         raise CSVError(
-            "Invalid CSV columns; columns must be: uuid,created_at,body,tags")
+            "Invalid CSV columns; columns must be: uuid,created_at,body,tags"
+        )
 
     for row in reader:
         try:
