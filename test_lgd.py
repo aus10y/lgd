@@ -11,6 +11,7 @@ import unittest
 import uuid
 
 import lgd
+from lgd import CSVError
 
 
 DB_IN_MEM = ":memory:"
@@ -32,7 +33,7 @@ def body_factory():
 
 
 def date_factory(multiple=1):
-    now = datetime.datetime.now()
+    now = datetime.datetime.now().replace(microsecond=0)
     delta = datetime.timedelta(seconds=random.randrange(0, 3600))
     return now - (multiple * delta)
 
@@ -228,8 +229,42 @@ class TestCSVNoteInsert(unittest.TestCase):
         self.assertEqual(inserted, len(NOTES))
         self.assertEqual(updated, 0)
 
-    def test_note_import_equality(self):
-        pass
+    def test_invalid_fieldnames(self):
+        infile = io.StringIO("a,b,c,d\n" "1,2,3,4\n")
+        with self.assertRaises(lgd.CSVError):
+            _, _ = lgd.note_import(self.conn, infile)
+
+    def test_invalid_uuid(self):
+        notes = note_factory(1, TAGS)
+
+        uuids = [1, "2", "asdf", hex(random.randint(0, 1_000_000))]
+
+        for uuid_bad in uuids:
+            with self.subTest(uuid_bad=uuid_bad):
+                notes[0] = notes[0]._replace(uuid=uuid_bad)
+                infile = note_csv_factory(notes)
+                with self.assertRaises(CSVError):
+                    _, _ = lgd.note_import(self.conn, infile)
+
+    def test_invalid_created_at(self):
+        notes = note_factory(1, TAGS)
+
+        dates = [
+            1,
+            "1",
+            "asdf",
+            "2020-04-01",
+            "2020-04-01 12",
+            "2020-04-01 12:00",
+            "2020-04-01 12:00:00.123456",
+        ]
+
+        for date_bad in dates:
+            with self.subTest(date_bad=date_bad):
+                notes[0] = notes[0]._replace(created_at=date_bad)
+                infile = note_csv_factory(notes)
+                with self.assertRaises(CSVError):
+                    _, _ = lgd.note_import(self.conn, infile)
 
 
 class TestCSVNoteUpdate(unittest.TestCase):
@@ -326,4 +361,4 @@ class TestCSVTagImportExport(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(buffer=True)

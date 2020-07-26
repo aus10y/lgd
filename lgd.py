@@ -278,7 +278,7 @@ CREATED_AT = "created_at"
 CREATE_LOGS_TABLE = """
 CREATE TABLE IF NOT EXISTS logs (
     uuid UUID PRIMARY KEY,
-    created_at int NOT NULL,
+    created_at timestamp NOT NULL,
     msg GZIP NOT NULL
 );
 """
@@ -327,7 +327,9 @@ CREATE TABLE IF NOT EXISTS tag_relations (
 
 def get_connection(db_path: str) -> sqlite3.Connection:
     # This creates the sqlite db if it doesn't exist.
-    conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+    conn = sqlite3.connect(
+        db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
+    )
 
     # Register adapters and converters.
     sqlite3.register_adapter(uuid.UUID, lambda u: u.bytes)
@@ -618,7 +620,7 @@ def split_tags(tags: str) -> FrozenSet[str]:
     return frozenset(t.strip() for t in tags.split(","))
 
 
-def rows_to_notes(rows):
+def rows_to_notes(rows: List[sqlite3.Row]):
     return (
         Note(r["uuid"], r["created_at"], r["body"], split_tags(r["tags"])) for r in rows
     )
@@ -635,12 +637,19 @@ TagRelation = namedtuple("TagRelation", ("direct", "indirect"))
 
 
 # -----------------------------------------------------------------------------
-# SQL queries and related functions
+# Exceptions
 
 
 class LgdException(Exception):
     pass
 
+
+class CSVError(LgdException):
+    pass
+
+
+# -----------------------------------------------------------------------------
+# SQL queries and related functions
 
 # Log / Message related
 
@@ -703,7 +712,7 @@ WHERE logs.uuid in (
 SELECT_LOGS_WITH_TAGS_ALL_TEMPL = """
 SELECT
     logs.uuid AS uuid,
-    datetime(logs.created_at{datetime_modifier}) AS created_at,
+    datetime(logs.created_at{datetime_modifier}) AS "created_at [timestamp]",
     logs.msg AS body,
     group_concat(tags.tag) AS tags
 FROM logs
@@ -717,7 +726,7 @@ ORDER BY logs.created_at;
 SELECT_LOGS_AND_TAGS_TEMPL = """
 SELECT
     logs.uuid AS uuid,
-    datetime(logs.created_at{datetime_modifier}) AS created_at,
+    datetime(logs.created_at{datetime_modifier}) AS "created_at [timestamp]",
     logs.msg AS body,
     group_concat(tags.tag) AS tags
 FROM logs
@@ -1436,7 +1445,7 @@ def handle_tag_disassociate(
 
 
 def note_export(conn: sqlite3.Connection, outfile: io.TextIOWrapper) -> int:
-    notes = messages_with_tags(conn, None, localtime=False)
+    notes = messages_with_tags(conn, [], localtime=False)
 
     writer = csv.DictWriter(outfile, Note._fields)
     writer.writeheader()
@@ -1453,9 +1462,32 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
     updated = 0
 
     reader = csv.DictReader(infile)
+    if set(reader.fieldnames) != set(Note._fields):
+        raise CSVError(
+            "Invalid CSV columns; columns must be: uuid,created_at,body,tags")
+
     for row in reader:
-        note = Note(**row)
-        note = note._replace(uuid=uuid.UUID(note.uuid))
+        try:
+            row[CREATED_AT] = datetime.strptime(row[CREATED_AT], "%Y-%m-%d %H:%M:%S")
+        except ValueError as e:
+            raise CSVError(
+                "Invalid 'created_at' format; timestamp must be 'YYYY-MM-DD HH:MM:SS'."
+            ) from e
+
+        try:
+            row[ID] = uuid.UUID(row[ID])
+        except ValueError as e:
+            raise CSVError(
+                "Invalid 'uuid' format; value must be string of hex digits. Curly braces, hyphens, and a URN prefix are all optional."
+            ) from e
+
+        try:
+            note = Note(**row)
+        except TypeError as e:
+            raise CSVError(
+                "Invalid CSV columns; columns must be: uuid,created_at,body,tags"
+            ) from e
+
         tags = note.tags.split(",")
 
         if msg_exists(conn, note.uuid):
@@ -1509,7 +1541,10 @@ if __name__ == "__main__":
 
     if args.note_file_in:
         with open(args.note_file_in, "r") as infile:
-            inserted, updated = note_import(conn, infile)
+            try:
+                inserted, updated = note_import(conn, infile)
+            except CSVError as e:
+                sys.exit(Term.error(str(e)))
         print(
             f" - Inserted {inserted}, updated {updated} notes from {args.note_file_in}"
         )
