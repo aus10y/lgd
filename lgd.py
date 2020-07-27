@@ -865,7 +865,9 @@ def select_tag(conn: sqlite3.Connection, tag: str) -> Union[sqlite3.Row, None]:
     return result[0] if result else None
 
 
-def select_tags(conn: sqlite3.Connection, tags: Iterable) -> List[sqlite3.Row]:
+def select_tags(
+    conn: sqlite3.Connection, tags: Union[List[str], Tuple[str, ...]]
+) -> List[sqlite3.Row]:
     tag_snippet = ", ".join("?" for _ in tags)
     sql = f"SELECT * FROM tags WHERE tag in ({tag_snippet})"
     c = conn.execute(sql, tags)
@@ -877,13 +879,13 @@ INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
 """
 
 
-def insert_tags(conn: sqlite3.Connection, tags):
+def insert_tags(conn: sqlite3.Connection, tags: Iterable[str]) -> Set[uuid.UUID]:
     tag_uuids = set()
     for tag in tags:
         result = select_tag(conn, tag)
         if result is None:
             tag_uuid = uuid.uuid4()
-            c = conn.execute(INSERT_TAG, (tag_uuid, tag))
+            _ = conn.execute(INSERT_TAG, (tag_uuid, tag))
         else:
             tag_uuid, _ = result
         tag_uuids.add(tag_uuid)
@@ -904,7 +906,9 @@ INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
 """
 
 
-def insert_asscs(conn: sqlite3.Connection, msg_uuid, tag_uuids):
+def insert_asscs(
+    conn: sqlite3.Connection, msg_uuid: uuid.UUID, tag_uuids: Iterable[uuid.UUID]
+) -> None:
     for tag_uuid in tag_uuids:
         try:
             conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
@@ -914,6 +918,19 @@ def insert_asscs(conn: sqlite3.Connection, msg_uuid, tag_uuids):
             else:
                 raise e
     conn.commit()
+    return
+
+
+def remove_asscs(
+    conn: sqlite3.Connection, msg_uuid: uuid.UUID, tag_uuids: Iterable[uuid.UUID]
+) -> None:
+    if not tag_uuids:
+        return
+
+    sql = "DELETE FROM logs_tags WHERE log_uuid = ? AND tag_uuid in ({tags})".format(
+        tags=",".join("?" for _ in tag_uuids)
+    )
+    conn.execute(sql, (msg_uuid, *tag_uuids))
     return
 
 
@@ -1095,6 +1112,9 @@ def tag_statistics(conn: sqlite3.Connection) -> sqlite3.Cursor:
 
 
 class RenderedLog:
+
+    _TAG_REGEX: Pattern[str] = re.compile(r".*\([Tt]ags:\s*(?P<tags>.*)\)")
+
     def __init__(
         self,
         notes: Iterable[Note],
@@ -1245,11 +1265,19 @@ class RenderedLog:
         TAG_LINE = "+ # Tags:"
         return line.startswith(TAG_LINE)
 
+    @classmethod
+    def _parse_tags(cls, line) -> Union[None, Set[str]]:
+        match = cls._TAG_REGEX.match(line)
+        if match is None:
+            return None
+        raw_tags = (t.strip() for t in match["tags"].split(","))
+        return {t for t in raw_tags if t}
+
     @staticmethod
-    def _parse_new_tags(line: str) -> List[str]:
+    def _parse_new_tags(line: str) -> Set[str]:
         TAG_LINE = "+ # Tags:"
         raw_tags = (t.strip() for t in line[len(TAG_LINE) :].split(","))
-        return [t for t in raw_tags if t]
+        return {t for t in raw_tags if t}
 
     def diff(self, other: Iterable[str], debug=False):
         """
@@ -1264,11 +1292,20 @@ class RenderedLog:
         line_num, text = diff[diff_index]
 
         for msg_uuid, line_from, line_to in self._line_map:
+            tags_original, tags_modified = None, None
+
             advance = 0
             for line_num, text in diff[diff_index:]:
                 if line_num < line_from:
-                    # Do nothing
-                    pass
+                    # Check for tag changes
+                    tags = RenderedLog._parse_tags(text)
+                    if tags is not None:
+                        if text.startswith("-"):
+                            tags_original = tags
+                        elif text.startswith("+"):
+                            tags_modified = tags
+                        else:
+                            tags_original = tags
                 elif line_num == line_from:
                     # Handle leading synthetic newline
                     if self._styled:
@@ -1293,21 +1330,23 @@ class RenderedLog:
                     line_num, msg_uuid, line_from, line_to, text, debug=debug
                 )
 
-                if RenderedLog._is_new_tag_line(text):
-                    print(
-                        f"New tags for msg '{msg_uuid}', {RenderedLog._parse_new_tags(text)}"
-                    )
-
                 advance += 1
 
             diff_index += advance
 
             # TODO: Refactor LogDiff so that lines are iteratively given to it.
-            log_diffs.append(LogDiff(msg_uuid, msg_diff, tags=self._tags_flat))
+            log_diffs.append(
+                LogDiff(
+                    msg_uuid,
+                    msg_diff,
+                    tags_original=tags_original,
+                    tags_modified=tags_modified,
+                )
+            )
             msg_diff = []
 
         # New msg
-        new_tags = self._tags_flat
+        new_tags = set(self._tags_flat)
         for line_num, text in diff[diff_index:]:
             RenderedLog._print_diff_info(line_num, None, None, None, text, debug=debug)
             if RenderedLog._is_new_tag_line(text):
@@ -1317,7 +1356,7 @@ class RenderedLog:
 
         # Create and append the new msg, if it exists
         if msg_diff:
-            log_diffs.append(LogDiff(None, msg_diff, tags=new_tags))
+            log_diffs.append(LogDiff(None, msg_diff, tags_original=new_tags))
 
         return log_diffs
 
@@ -1327,7 +1366,8 @@ class LogDiff:
         self,
         msg_uuid: uuid.UUID,
         diff_lines: List[str],
-        tags: Union[List[str], None] = None,
+        tags_original: Union[Set[str], None] = None,
+        tags_modified: Union[Set[str], None] = None,
     ):
         """
         mods: iterable of (change, line_num, text)
@@ -1335,11 +1375,16 @@ class LogDiff:
         self.msg_uuid = msg_uuid
         self.msg = "".join(difflib.restore(diff_lines, 2))
         self.diff = diff_lines
-        self.modified = any(
+        self._note_modified = any(
             (line.startswith("- ") or line.startswith("+ ") for line in diff_lines)
         )
         self.is_new = msg_uuid is None
-        self.tags = tags if tags else []
+
+        self.tags_original = tags_original
+        self.tags_modified = tags_modified
+        self._tags_modified = tags_modified is not None and (
+            tags_original != tags_modified
+        )
 
     def __str__(self):
         return "".join(self.diff)
@@ -1347,6 +1392,16 @@ class LogDiff:
     def __repr__(self):
         id_str = str(self.msg_uuid) if not self.is_new else "New"
         return f"<LogDiff({id_str})>\n{str(self)}</LogDiff>"
+
+    @property
+    def modified(self):
+        return self._note_modified or self._tags_modified
+
+    @property
+    def tags(self):
+        if self.tags_modified is not None:
+            return self.tags_modified
+        return self.tags_original or set()
 
     def update_or_create(self, conn: sqlite3.Connection, commit: bool = True):
         if self.is_new:
@@ -1368,15 +1423,20 @@ class LogDiff:
 
     def _update(self, conn: sqlite3.Connection, commit: bool = True):
         if not self.modified:
-            return False
+            return True
 
         if not self.msg:
             # TODO: delete msg or mark as deleted?
             pass
 
-        if not self._update_msg(conn):
-            # TODO: Maybe throw a custom exception?
-            return False
+        if self._note_modified:
+            if not self._update_msg(conn):
+                # TODO: Maybe throw a custom exception?
+                return False
+
+        if self.tags_modified:
+            if not self._update_tags(conn):
+                return False
 
         if not self._update_diffs(conn):
             # TODO: Rollback? Throw exception?
@@ -1390,6 +1450,19 @@ class LogDiff:
 
     def _update_msg(self, conn: sqlite3.Connection):
         return update_msg(conn, self.msg_uuid, self.msg)
+
+    def _update_tags(self, conn: sqlite3.Connection):
+        tags_add = self.tags_modified - self.tags_original
+        if tags_add:
+            tag_uuids = insert_tags(conn, tags_add)
+            insert_asscs(conn, self.msg_uuid, tag_uuids)
+
+        tags_sub = self.tags_original - self.tags_modified
+        if tags_sub:
+            tag_uuids = {t[0] for t in select_tags(conn, tuple(tags_sub))}
+            remove_asscs(conn, self.msg_uuid, tag_uuids)
+
+        return True
 
     def _update_diffs(self, conn: sqlite3.Connection):
         # TODO: Save diff info
