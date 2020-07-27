@@ -616,8 +616,8 @@ def format_tag_statistics(cur: sqlite3.Cursor) -> List[str]:
     return stats_table
 
 
-def split_tags(tags: str) -> FrozenSet[str]:
-    return frozenset(t.strip() for t in tags.split(","))
+def split_tags(tags: Union[str, None]) -> FrozenSet[str]:
+    return frozenset(t.strip() for t in tags.split(",")) if tags else frozenset()
 
 
 def rows_to_notes(rows: List[sqlite3.Row]):
@@ -709,6 +709,13 @@ WHERE logs.uuid in (
 ){date_range};
 """
 
+SELECT_LOGS_HAVING_NO_TAGS = """
+SELECT logs.uuid
+FROM logs
+LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
+WHERE lt.log_uuid is NULL;
+"""
+
 SELECT_LOGS_WITH_TAGS_ALL_TEMPL = """
 SELECT
     logs.uuid AS uuid,
@@ -764,14 +771,18 @@ def _msg_uuids_having_tags(
     msg_uuids = set()  # using a set in order to de-duplicate.
 
     for tags in tag_groups:
-        select = format_template_tags_dates(
-            SELECT_LOGS_HAVING_TAGS_TEMPL,
-            tags,
-            date_col="logs.created_at",
-            date_range=date_range,
-        )
-        for row in conn.execute(select, (*tags, len(tags))):
-            msg_uuids.add(row[ID])
+        if tags == ('',):
+            for row in conn.execute(SELECT_LOGS_HAVING_NO_TAGS):
+                msg_uuids.add(row[ID])
+        else:
+            select = format_template_tags_dates(
+                SELECT_LOGS_HAVING_TAGS_TEMPL,
+                tags,
+                date_col="logs.created_at",
+                date_range=date_range,
+            )
+            for row in conn.execute(select, (*tags, len(tags))):
+                msg_uuids.add(row[ID])
 
     return msg_uuids
 
@@ -1292,7 +1303,7 @@ class RenderedLog:
         line_num, text = diff[diff_index]
 
         for msg_uuid, line_from, line_to in self._line_map:
-            tags_original, tags_modified = None, None
+            tags_original, tags_updated = None, None
 
             advance = 0
             for line_num, text in diff[diff_index:]:
@@ -1303,7 +1314,7 @@ class RenderedLog:
                         if text.startswith("-"):
                             tags_original = tags
                         elif text.startswith("+"):
-                            tags_modified = tags
+                            tags_updated = tags
                         else:
                             tags_original = tags
                 elif line_num == line_from:
@@ -1340,7 +1351,7 @@ class RenderedLog:
                     msg_uuid,
                     msg_diff,
                     tags_original=tags_original,
-                    tags_modified=tags_modified,
+                    tags_updated=tags_updated,
                 )
             )
             msg_diff = []
@@ -1367,7 +1378,7 @@ class LogDiff:
         msg_uuid: uuid.UUID,
         diff_lines: List[str],
         tags_original: Union[Set[str], None] = None,
-        tags_modified: Union[Set[str], None] = None,
+        tags_updated: Union[Set[str], None] = None,
     ):
         """
         mods: iterable of (change, line_num, text)
@@ -1381,9 +1392,9 @@ class LogDiff:
         self.is_new = msg_uuid is None
 
         self.tags_original = tags_original
-        self.tags_modified = tags_modified
-        self._tags_modified = tags_modified is not None and (
-            tags_original != tags_modified
+        self.tags_updated = tags_updated
+        self._tags_modified = tags_updated is not None and (
+            tags_original != tags_updated
         )
 
     def __str__(self):
@@ -1399,8 +1410,8 @@ class LogDiff:
 
     @property
     def tags(self):
-        if self.tags_modified is not None:
-            return self.tags_modified
+        if self.tags_updated is not None:
+            return self.tags_updated
         return self.tags_original or set()
 
     def update_or_create(self, conn: sqlite3.Connection, commit: bool = True):
@@ -1434,7 +1445,7 @@ class LogDiff:
                 # TODO: Maybe throw a custom exception?
                 return False
 
-        if self.tags_modified:
+        if self._tags_modified:
             if not self._update_tags(conn):
                 return False
 
@@ -1452,12 +1463,12 @@ class LogDiff:
         return update_msg(conn, self.msg_uuid, self.msg)
 
     def _update_tags(self, conn: sqlite3.Connection):
-        tags_add = self.tags_modified - self.tags_original
+        tags_add = self.tags_updated - self.tags_original
         if tags_add:
             tag_uuids = insert_tags(conn, tags_add)
             insert_asscs(conn, self.msg_uuid, tag_uuids)
 
-        tags_sub = self.tags_original - self.tags_modified
+        tags_sub = self.tags_original - self.tags_updated
         if tags_sub:
             tag_uuids = {t[0] for t in select_tags(conn, tuple(tags_sub))}
             remove_asscs(conn, self.msg_uuid, tag_uuids)
