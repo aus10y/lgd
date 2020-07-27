@@ -771,7 +771,7 @@ def _msg_uuids_having_tags(
     msg_uuids = set()  # using a set in order to de-duplicate.
 
     for tags in tag_groups:
-        if tags == ('',):
+        if tags == ("",):
             for row in conn.execute(SELECT_LOGS_HAVING_NO_TAGS):
                 msg_uuids.add(row[ID])
         else:
