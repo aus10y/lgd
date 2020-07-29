@@ -11,7 +11,6 @@ import unittest
 import uuid
 
 import lgd
-from lgd import CSVError
 
 
 DB_IN_MEM = ":memory:"
@@ -243,7 +242,7 @@ class TestCSVNoteInsert(unittest.TestCase):
             with self.subTest(uuid_bad=uuid_bad):
                 notes[0] = notes[0]._replace(uuid=uuid_bad)
                 infile = note_csv_factory(notes)
-                with self.assertRaises(CSVError):
+                with self.assertRaises(lgd.CSVError):
                     _, _ = lgd.note_import(self.conn, infile)
 
     def test_invalid_created_at(self):
@@ -263,7 +262,7 @@ class TestCSVNoteInsert(unittest.TestCase):
             with self.subTest(date_bad=date_bad):
                 notes[0] = notes[0]._replace(created_at=date_bad)
                 infile = note_csv_factory(notes)
-                with self.assertRaises(CSVError):
+                with self.assertRaises(lgd.CSVError):
                     _, _ = lgd.note_import(self.conn, infile)
 
 
