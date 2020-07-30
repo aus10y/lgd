@@ -66,9 +66,9 @@ Edit the tags associated with a note.
 Requires Python 3.6+.  
 
 **Install**  
-- `git clone git@github.com:aus10y/lgd.git` (Clone with SSH)
-- `cd lgd`
-- `make install`
+- `$ git clone git@github.com:aus10y/lgd.git` (Clone with SSH)
+- `$ cd lgd`
+- `$ make install`
 
 **Uninstall**  
-- `make uninstall`
+- `$ make uninstall`
