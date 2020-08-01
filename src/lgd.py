@@ -543,7 +543,7 @@ def open_temp_logfile(lines: Union[List[str], None] = None) -> str:
             tf.flush()
         tf.close()
 
-        call([EDITOR, tf.name])
+        call([*(EDITOR.split(' ')), tf.name])
 
         with open(tf.name) as f:
             contents = f.read()
