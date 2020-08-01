@@ -4,6 +4,8 @@ LGD_TESTS = ./src/test_lgd.py
 LGD_DB = ~/.lgd/logs.db
 BACKUP_NOTES = ~/.lgd/backup_notes.csv
 BACKUP_TAGS = ~/.lgd/backup_tags.csv
+COMPLETIONS = ./scripts/lgd_completion.sh
+COMPLETIONS_ETC = /etc/bash_completion.d/lgd_completion.sh
 
 .PHONY: help install uninstall update test backup
 
@@ -23,6 +25,12 @@ install:
 uninstall:
 	@rm -f ${LGD}
 	@echo "Removed ${LGD}"
+
+install-completions:
+	cp ${COMPLETIONS} ${COMPLETIONS_ETC}
+
+uninstall-completions:
+	rm ${COMPLETIONS_ETC}
 
 ${LGD}: ${LGD_PY}
 	@cp ${LGD_PY} ${LGD}
