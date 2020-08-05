@@ -13,6 +13,8 @@ help:
 	@echo "Options:"
 	@echo "- make install"
 	@echo "- make uninstall"
+	@echo "- make install-completions (requires sudo)"
+	@echo "- make uninstall-completions (requires sudo)"
 	@echo "- make update"
 	@echo "- make test"
 	@echo "- make backup"
