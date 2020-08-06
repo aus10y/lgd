@@ -8,6 +8,7 @@ import io
 import itertools
 import os
 import re
+import shlex
 import sys
 import sqlite3
 import tempfile
@@ -245,6 +246,16 @@ parser.add_argument(
     help=(
         "Export tag associations."
         " Tag associations will be exported in a comma separated format (CSV)."
+    ),
+)
+parser.add_argument(
+    "-M",
+    "--meta",
+    dest="metadata",
+    action="store_true",
+    help=(
+        "Print note metadata to the terminal. Note UUIDs, created at"
+        " datetimes, and tags are displayed."
     ),
 )
 
@@ -543,7 +554,7 @@ def open_temp_logfile(lines: Union[List[str], None] = None) -> str:
             tf.flush()
         tf.close()
 
-        call([*(EDITOR.split(' ')), tf.name])
+        call([*(shlex.split(EDITOR)), tf.name])
 
         with open(tf.name) as f:
             contents = f.read()
@@ -1705,6 +1716,15 @@ if __name__ == "__main__":
         expanded_tag_groups = expand_tag_groups(conn, tag_groups)
 
         messages = messages_with_tags(conn, expanded_tag_groups, args.date_ranges)
+
+        if args.metadata:
+            # Print Note metadata
+            for msg in messages:
+                tags = ",".join(sorted(msg.tags))
+                print(f'{msg.uuid},{msg.created_at},"{tags}"')
+
+            sys.exit()
+
         message_view = RenderedLog(
             messages, tag_groups, expanded_tag_groups, style=(not args.plain)
         )
