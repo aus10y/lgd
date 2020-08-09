@@ -365,7 +365,7 @@ END;
 """
 
 
-def get_connection(db_path: str) -> sqlite3.Connection:
+def get_connection(db_path: str, debug=True) -> sqlite3.Connection:
     # This creates the sqlite db if it doesn't exist.
     conn = sqlite3.connect(
         db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
@@ -382,6 +382,11 @@ def get_connection(db_path: str) -> sqlite3.Connection:
 
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
+
+    if debug:
+        sqlite3.enable_callback_tracebacks(True)
+        conn.set_trace_callback(print)
+
     return conn
 
 
@@ -1210,10 +1215,13 @@ SELECT_NOTES_WHERE_TEMPL = """
 SELECT logs.uuid
 FROM logs
 WHERE
-    ({tags_filter})
+    ({uuid_filter})
+AND ({tags_filter})
 AND ({text_filter})
 AND ({date_filter});
 """
+
+_WHERE_UUIDS = """logs.uuid IN ({uuids})"""
 
 _WHERE_TAGS = """(logs.uuid in (
     SELECT log_uuid
@@ -1248,11 +1256,17 @@ _WHERE_FTS = """logs.uuid in (
 
 def note_uuids_where(
     conn: sqlite3.Connection,
-    tag_groups: List[Tuple[str, ...]],
+    uuids: Optional[List[uuid.UUID]] = None,
+    tag_groups: Optional[List[Tuple[str, ...]]] = None,
     date_ranges=None,
-    text=None,
+    text: Optional[str] = None,
 ) -> List[uuid.UUID]:
     params = []
+
+    uuid_filter = "1"
+    if uuids:
+        uuid_filter = _WHERE_UUIDS.format(uuids=", ".join("?" for _ in uuids))
+        params.extend(uuids)
 
     tags_filter = "1"
     if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
@@ -1284,7 +1298,10 @@ def note_uuids_where(
         )
 
     query = SELECT_NOTES_WHERE_TEMPL.format(
-        tags_filter=tags_filter, text_filter=text_filter, date_filter=date_filter,
+        uuid_filter=uuid_filter,
+        tags_filter=tags_filter,
+        text_filter=text_filter,
+        date_filter=date_filter,
     )
 
     return [r["uuid"] for r in conn.execute(query, params).fetchall()]
