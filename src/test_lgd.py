@@ -295,7 +295,7 @@ class TestCSVNoteExport(unittest.TestCase):
 
     def test_note_export_equality(self):
         # Retrieve Notes inserted during setup.
-        notes1 = set(lgd.messages_with_tags(self.conn, None))
+        notes1 = set(lgd.select_notes(self.conn))
         self.assertEqual(len(notes1), len(NOTES))
 
         # Export from the setUp DB.
@@ -312,7 +312,7 @@ class TestCSVNoteExport(unittest.TestCase):
 
         # Retrieve the Notes from the 2nd DB.
         # Check that the notes retrieved from both DBs are equal.
-        notes2 = set(lgd.messages_with_tags(conn2, None))
+        notes2 = set(lgd.select_notes(conn2))
         self.assertEqual(notes1, notes2)
 
 
