@@ -15,7 +15,7 @@ import tempfile
 import uuid
 
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from subprocess import call
 from typing import (
@@ -24,6 +24,7 @@ from typing import (
     Generator,
     Iterable,
     List,
+    Optional,
     Pattern,
     Set,
     Tuple,
@@ -157,6 +158,14 @@ parser.add_argument(
         " Ex. `--date YYYY/MM/DD`. The year, or year and month fields may be"
         " given without the rest of the data. Ex. `-d YYYY.MM`, `-d YYYY`."
     ),
+)
+parser.add_argument(
+    "-s",
+    "--search",
+    action="store",
+    type=str,
+    dest="search",
+    help=("Search notes for the given string."),
 )
 parser.add_argument(
     "-",
@@ -335,6 +344,26 @@ CREATE TABLE IF NOT EXISTS tag_relations (
 );
 """
 
+# Create the full text search table using the External-Content-Table syntax.
+CREATE_FTS_TABLE = """
+CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
+    note, content=''
+);
+"""
+
+FTS_TRIGGERS = """
+CREATE TRIGGER logs_ai AFTER INSERT ON logs BEGIN
+    INSERT INTO logs_fts(rowid, note) VALUES (NEW.rowid, unzip(NEW.msg));
+END;
+CREATE TRIGGER logs_ad AFTER DELETE ON logs BEGIN
+    INSERT INTO logs_fts(logs_fts, rowid, note) VALUES('delete', OLD.rowid, unzip(OLD.msg));
+END;
+CREATE TRIGGER logs_au AFTER UPDATE ON logs BEGIN
+    INSERT INTO logs_fts(logs_fts, rowid, note) VALUES('delete', OLD.rowid, unzip(OLD.msg));
+    INSERT INTO logs_fts(rowid, note) VALUES (NEW.rowid, unzip(NEW.msg));
+END;
+"""
+
 
 def get_connection(db_path: str) -> sqlite3.Connection:
     # This creates the sqlite db if it doesn't exist.
@@ -347,6 +376,9 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     sqlite3.register_converter("UUID", lambda b: uuid.UUID(bytes=b))
     sqlite3.register_adapter(Gzip, lambda s: Gzip.compress_string(s))
     sqlite3.register_converter(Gzip.COL_TYPE, lambda b: Gzip.decompress_string(b))
+
+    # Register functions
+    conn.create_function("unzip", 1, Gzip.decompress_string)
 
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -380,6 +412,10 @@ def db_init(conn):
 
     # Ensure tag relations table
     conn.execute(CREATE_TAG_RELATIONS_TABLE)
+
+    # Ensure full text search table & triggers
+    conn.execute(CREATE_FTS_TABLE)
+    conn.executescript(FTS_TRIGGERS)
 
 
 DB_MIGRATIONS = [
@@ -1129,6 +1165,131 @@ def tag_statistics(conn: sqlite3.Connection) -> sqlite3.Cursor:
     return results
 
 
+SELECT_NOTES_WITH_TAGS_TEMPL = """
+SELECT
+    logs.uuid AS uuid,
+    datetime(logs.created_at{datetime_modifier}) AS "created_at [timestamp]",
+    logs.msg AS body,
+    group_concat(tags.tag) AS tags
+FROM logs
+LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
+LEFT JOIN tags ON tags.uuid = lt.tag_uuid
+WHERE 1{uuid_filter}
+GROUP BY logs.uuid, logs.created_at, logs.msg
+ORDER BY logs.created_at;
+"""
+
+
+def get_notes(
+    conn: sqlite3.Connection,
+    uuids: Optional[List[uuid.UUID]] = None,
+    localtime: bool = True,
+) -> List[Note]:
+    params = ()
+
+    uuid_filter = ""
+    if uuids:
+        params = tuple(uuids)
+        uuid_filter = " AND logs.uuid IN ({uuids})".format(
+            uuids=", ".join("?" for _ in uuids)
+        )
+
+    datetime_modifier = ""
+    if localtime:
+        datetime_modifier = ", 'localtime'"
+
+    query = SELECT_NOTES_WITH_TAGS_TEMPL.format(
+        datetime_modifier=datetime_modifier, uuid_filter=uuid_filter,
+    )
+    print(query)
+
+    return list(rows_to_notes(conn.execute(query, params).fetchall()))
+
+
+SELECT_NOTES_WHERE_TEMPL = """
+SELECT logs.uuid
+FROM logs
+WHERE
+    ({tags_filter})
+AND ({text_filter})
+AND ({date_filter});
+"""
+
+_WHERE_TAGS = """(logs.uuid in (
+    SELECT log_uuid
+    FROM logs_tags
+    WHERE tag_uuid in (
+        SELECT uuid
+        FROM tags
+        WHERE tag in ({tags})
+    )
+    GROUP BY log_uuid
+    HAVING COUNT(tag_uuid) >= ?))
+"""
+
+_WHERE_NO_TAGS = """(logs.uuid in (
+    SELECT logs.uuid
+    FROM logs
+    LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
+    WHERE lt.log_uuid is NULL))
+"""
+
+_WHERE_FTS = """logs.uuid in (
+    SELECT logs.uuid
+    FROM logs
+    INNER JOIN (
+        SELECT rowid
+        FROM logs_fts
+        WHERE logs_fts MATCH ?
+        ORDER BY rank) fts on fts.rowid = logs.rowid
+)
+"""
+
+
+def note_uuids_where(
+    conn: sqlite3.Connection,
+    tag_groups: List[Tuple[str, ...]],
+    date_ranges=None,
+    text=None,
+) -> List[uuid.UUID]:
+    params = []
+
+    tags_filter = "1"
+    if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
+        # TODO: The following can be improved for complex tag groupings.
+        tag_fragments = []
+        for tag_group in tag_groups:
+            # Check for notes having not tags.
+            if tag_group == ("",):
+                tag_fragments.append(_WHERE_NO_TAGS)
+            else:
+                tag_fragments.append(
+                    _WHERE_TAGS.format(tags=", ".join("?" for _ in tag_group))
+                )
+                params.extend((*tag_group, len(tag_group)))
+        tags_filter = " OR ".join(tag_fragments)
+
+    text_filter = "1"
+    if text:
+        text_filter = _WHERE_FTS
+        params.append(text)
+
+    date_filter = "1"
+    if date_ranges:
+        date_filter = " OR ".join(
+            _DATE_BETWEEN_FRAGMENT.format(
+                column="logs.created_at", begin=date_range[0], end=date_range[1],
+            )
+            for date_range in date_ranges
+        )
+
+    query = SELECT_NOTES_WHERE_TEMPL.format(
+        tags_filter=tags_filter, text_filter=text_filter, date_filter=date_filter,
+    )
+
+    return [r["uuid"] for r in conn.execute(query, params).fetchall()]
+
+
 # -----------------------------------------------------------------------------
 # Rendering and Diffing logs
 
@@ -1187,13 +1348,13 @@ class RenderedLog:
 
     @staticmethod
     def _editor_header(tag_groups: List[Tuple[str, ...]]):
-        tag_groups = (", ".join(group) for group in tag_groups)
-        tags_together = " || ".join(f"<{tg}>" for tg in tag_groups)
+        _tag_groups = (", ".join(group) for group in tag_groups)
+        tags_together = " || ".join(f"<{tg}>" for tg in _tag_groups)
         header = f"# TAGS: {tags_together}\n"
         return header
 
     @staticmethod
-    def _note_header(note: Note):
+    def _note_header(note: Note) -> Tuple[str, ...]:
         tags_str = "" if not note.tags else ", ".join(sorted(note.tags))
         id_str = str(note.uuid)[:8]  # Only show first eight digits of UUID
         header = (
@@ -1205,11 +1366,15 @@ class RenderedLog:
         return header
 
     @staticmethod
-    def _note_footer(note: Note):
+    def _note_footer(note: Note) -> Tuple[str, ...]:
+        # Add a newline, but only if there's not already an empty line at the
+        # end of the note body.
+        if note.body[-2:] == "\n\n":
+            return ()
         return ("\n",)
 
     @staticmethod
-    def _editor_footer(tags: Iterable[str]):
+    def _editor_footer(tags: Iterable[str]) -> Tuple[str, ...]:
         footer = (
             f'{79*"-"}\n',
             f"# Enter new log message below\n",
