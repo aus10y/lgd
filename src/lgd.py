@@ -672,7 +672,7 @@ def split_tags(tags: Union[str, None]) -> FrozenSet[str]:
     return frozenset(t.strip() for t in tags.split(",")) if tags else frozenset()
 
 
-def rows_to_notes(rows: List[sqlite3.Row]):
+def rows_to_notes(rows: List[sqlite3.Row]) -> Generator["Note", None, None]:
     return (
         Note(r["uuid"], r["created_at"], r["body"], split_tags(r["tags"])) for r in rows
     )
@@ -1170,7 +1170,7 @@ def tag_statistics(conn: sqlite3.Connection) -> sqlite3.Cursor:
     return results
 
 
-SELECT_NOTES_WITH_TAGS_TEMPL = """
+SELECT_NOTES_WHERE_TEMPL = """
 SELECT
     logs.uuid AS uuid,
     datetime(logs.created_at{datetime_modifier}) AS "created_at [timestamp]",
@@ -1179,46 +1179,13 @@ SELECT
 FROM logs
 LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
 LEFT JOIN tags ON tags.uuid = lt.tag_uuid
-WHERE 1{uuid_filter}
-GROUP BY logs.uuid, logs.created_at, logs.msg
-ORDER BY logs.created_at;
-"""
-
-
-def get_notes(
-    conn: sqlite3.Connection,
-    uuids: Optional[List[uuid.UUID]] = None,
-    localtime: bool = True,
-) -> List[Note]:
-    params = ()
-
-    uuid_filter = ""
-    if uuids:
-        params = tuple(uuids)
-        uuid_filter = " AND logs.uuid IN ({uuids})".format(
-            uuids=", ".join("?" for _ in uuids)
-        )
-
-    datetime_modifier = ""
-    if localtime:
-        datetime_modifier = ", 'localtime'"
-
-    query = SELECT_NOTES_WITH_TAGS_TEMPL.format(
-        datetime_modifier=datetime_modifier, uuid_filter=uuid_filter,
-    )
-    print(query)
-
-    return list(rows_to_notes(conn.execute(query, params).fetchall()))
-
-
-SELECT_NOTES_WHERE_TEMPL = """
-SELECT logs.uuid
-FROM logs
 WHERE
     ({uuid_filter})
 AND ({tags_filter})
 AND ({text_filter})
-AND ({date_filter});
+AND ({date_filter})
+GROUP BY logs.uuid, logs.created_at, logs.msg
+ORDER BY logs.created_at;
 """
 
 _WHERE_UUIDS = """logs.uuid IN ({uuids})"""
@@ -1254,20 +1221,23 @@ _WHERE_FTS = """logs.uuid in (
 """
 
 
-def note_uuids_where(
+def select_notes(
     conn: sqlite3.Connection,
     uuids: Optional[List[uuid.UUID]] = None,
     tag_groups: Optional[List[Tuple[str, ...]]] = None,
-    date_ranges=None,
+    date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
     text: Optional[str] = None,
-) -> List[uuid.UUID]:
+    localtime: bool = True,
+) -> List[Note]:
     params = []
 
+    # Where having uuids
     uuid_filter = "1"
     if uuids:
         uuid_filter = _WHERE_UUIDS.format(uuids=", ".join("?" for _ in uuids))
         params.extend(uuids)
 
+    # Where tagged with
     tags_filter = "1"
     if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
         # TODO: The following can be improved for complex tag groupings.
@@ -1283,11 +1253,13 @@ def note_uuids_where(
                 params.extend((*tag_group, len(tag_group)))
         tags_filter = " OR ".join(tag_fragments)
 
+    # Where contains the text
     text_filter = "1"
     if text:
         text_filter = _WHERE_FTS
         params.append(text)
 
+    # Where between dates
     date_filter = "1"
     if date_ranges:
         date_filter = " OR ".join(
@@ -1297,14 +1269,22 @@ def note_uuids_where(
             for date_range in date_ranges
         )
 
+    # Format the datetime
+    datetime_modifier = ""
+    if localtime:
+        datetime_modifier = ", 'localtime'"
+
     query = SELECT_NOTES_WHERE_TEMPL.format(
         uuid_filter=uuid_filter,
         tags_filter=tags_filter,
         text_filter=text_filter,
         date_filter=date_filter,
+        datetime_modifier=datetime_modifier,
     )
 
-    return [r["uuid"] for r in conn.execute(query, params).fetchall()]
+    print(f"Query:\n{query}\n\n{params}\n")
+
+    return list(rows_to_notes(conn.execute(query, params).fetchall()))
 
 
 # -----------------------------------------------------------------------------
@@ -1722,7 +1702,8 @@ def handle_tag_disassociate(
 
 
 def note_export(conn: sqlite3.Connection, outfile: io.TextIOWrapper) -> int:
-    notes = messages_with_tags(conn, [], localtime=False)
+    #notes = messages_with_tags(conn, [], localtime=False)
+    notes = select_notes(conn, localtime=False)
 
     writer = csv.DictWriter(outfile, Note._fields)
     writer.writeheader()
@@ -1893,11 +1874,17 @@ if __name__ == "__main__":
         sys.exit()
 
     # Display messages
-    if args.tags or args.date_ranges:
+    if args.tags or args.date_ranges or args.search:
         tag_groups = [tg for tg in (args.tags or []) if tg]
         expanded_tag_groups = expand_tag_groups(conn, tag_groups)
 
-        messages = messages_with_tags(conn, expanded_tag_groups, args.date_ranges)
+        #messages = messages_with_tags(conn, expanded_tag_groups, args.date_ranges)
+        messages = select_notes(
+            conn,
+            tag_groups=expanded_tag_groups,
+            date_ranges=args.date_ranges,
+            text=args.search,
+        )
 
         if args.metadata:
             # Print Note metadata
