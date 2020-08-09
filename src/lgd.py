@@ -365,7 +365,7 @@ END;
 """
 
 
-def get_connection(db_path: str, debug=True) -> sqlite3.Connection:
+def get_connection(db_path: str, debug=False) -> sqlite3.Connection:
     # This creates the sqlite db if it doesn't exist.
     conn = sqlite3.connect(
         db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
@@ -727,28 +727,27 @@ def insert_msg(
     return msg_uuid
 
 
-UPDATE_LOG = """
-UPDATE logs SET msg = ? WHERE uuid = ?
-"""
-
-
-def update_msg(conn: sqlite3.Connection, msg_uuid: uuid.UUID, msg: str) -> bool:
-    c = conn.execute(UPDATE_LOG, (Gzip(msg), msg_uuid))
-    return c.rowcount == 1
-
-
-AND_DATE_BETWEEN_TEMPL = """
- AND ({ranges})
-"""
-
-_DATE_BETWEEN_FRAGMENT = """
-({column} BETWEEN '{begin}' AND '{end}')
-"""
-
-SELECT_LOGS_HAVING_TAGS_TEMPL = """
-SELECT logs.uuid
+SELECT_NOTES_WHERE_TEMPL = """
+SELECT
+    logs.uuid AS uuid,
+    datetime(logs.created_at{datetime_modifier}) AS "created_at [timestamp]",
+    logs.msg AS body,
+    group_concat(tags.tag) AS tags
 FROM logs
-WHERE logs.uuid in (
+LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
+LEFT JOIN tags ON tags.uuid = lt.tag_uuid
+WHERE
+    ({uuid_filter})
+AND ({tags_filter})
+AND ({text_filter})
+AND ({date_filter})
+GROUP BY logs.uuid, logs.created_at, logs.msg
+ORDER BY logs.created_at;
+"""
+
+_WHERE_UUIDS = """logs.uuid IN ({uuids})"""
+
+_WHERE_TAGS = """(logs.uuid in (
     SELECT log_uuid
     FROM logs_tags
     WHERE tag_uuid in (
@@ -757,109 +756,104 @@ WHERE logs.uuid in (
         WHERE tag in ({tags})
     )
     GROUP BY log_uuid
-    HAVING COUNT(tag_uuid) >= ?
-){date_range};
+    HAVING COUNT(tag_uuid) >= ?))
 """
 
-SELECT_LOGS_HAVING_NO_TAGS = """
-SELECT logs.uuid
-FROM logs
-LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
-WHERE lt.log_uuid is NULL;
+_WHERE_NO_TAGS = """(logs.uuid in (
+    SELECT logs.uuid
+    FROM logs
+    LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
+    WHERE lt.log_uuid is NULL))
 """
 
-SELECT_LOGS_WITH_TAGS_ALL_TEMPL = """
-SELECT
-    logs.uuid AS uuid,
-    datetime(logs.created_at{datetime_modifier}) AS "created_at [timestamp]",
-    logs.msg AS body,
-    group_concat(tags.tag) AS tags
-FROM logs
-LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
-LEFT JOIN tags ON tags.uuid = lt.tag_uuid
-WHERE 1{date_range}
-GROUP BY logs.uuid, logs.created_at, logs.msg
-ORDER BY logs.created_at;
+_WHERE_FTS = """logs.uuid in (
+    SELECT logs.uuid
+    FROM logs
+    INNER JOIN (
+        SELECT rowid
+        FROM logs_fts
+        WHERE logs_fts MATCH ?
+        ORDER BY rank) fts on fts.rowid = logs.rowid
+)
 """
 
-SELECT_LOGS_AND_TAGS_TEMPL = """
-SELECT
-    logs.uuid AS uuid,
-    datetime(logs.created_at{datetime_modifier}) AS "created_at [timestamp]",
-    logs.msg AS body,
-    group_concat(tags.tag) AS tags
-FROM logs
-LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
-LEFT JOIN tags ON tags.uuid = lt.tag_uuid
-WHERE logs.uuid in ({msgs})
-GROUP BY logs.uuid, logs.created_at, logs.msg
-ORDER BY logs.created_at;
+_DATE_BETWEEN_FRAGMENT = """
+({column} BETWEEN '{begin}' AND '{end}')
 """
 
 
-def _format_date_range(column: str, date_ranges) -> str:
-    if not date_ranges:
-        return ""
+def select_notes(
+    conn: sqlite3.Connection,
+    uuids: Optional[List[uuid.UUID]] = None,
+    tag_groups: Optional[List[Tuple[str, ...]]] = None,
+    date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
+    text: Optional[str] = None,
+    localtime: bool = True,
+) -> List[Note]:
+    params = []
 
-    ranges = " OR ".join(
-        _DATE_BETWEEN_FRAGMENT.format(
-            column=column, begin=date_range[0], end=date_range[1]
+    # Where having uuids
+    uuid_filter = "1"
+    if uuids:
+        uuid_filter = _WHERE_UUIDS.format(uuids=", ".join("?" for _ in uuids))
+        params.extend(uuids)
+
+    # Where tagged with
+    tags_filter = "1"
+    if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
+        # TODO: The following can be improved for complex tag groupings.
+        tag_fragments = []
+        for tag_group in tag_groups:
+            # Check for notes having not tags.
+            if tag_group == ("",):
+                tag_fragments.append(_WHERE_NO_TAGS)
+            else:
+                tag_fragments.append(
+                    _WHERE_TAGS.format(tags=", ".join("?" for _ in tag_group))
+                )
+                params.extend((*tag_group, len(tag_group)))
+        tags_filter = " OR ".join(tag_fragments)
+
+    # Where contains the text
+    text_filter = "1"
+    if text:
+        text_filter = _WHERE_FTS
+        params.append(text)
+
+    # Where between dates
+    date_filter = "1"
+    if date_ranges:
+        date_filter = " OR ".join(
+            _DATE_BETWEEN_FRAGMENT.format(
+                column="logs.created_at", begin=date_range[0], end=date_range[1],
+            )
+            for date_range in date_ranges
         )
-        for date_range in date_ranges
+
+    # Format the datetime
+    datetime_modifier = ""
+    if localtime:
+        datetime_modifier = ", 'localtime'"
+
+    query = SELECT_NOTES_WHERE_TEMPL.format(
+        uuid_filter=uuid_filter,
+        tags_filter=tags_filter,
+        text_filter=text_filter,
+        date_filter=date_filter,
+        datetime_modifier=datetime_modifier,
     )
 
-    return AND_DATE_BETWEEN_TEMPL.format(ranges=ranges)
+    return list(rows_to_notes(conn.execute(query, params).fetchall()))
 
 
-def format_template_tags_dates(template: str, tags, date_col, date_range) -> str:
-    tags = ", ".join("?" for _ in tags)
-    dates = _format_date_range(date_col, date_range)
-    return template.format(tags=tags, date_range=dates)
+UPDATE_LOG = """
+UPDATE logs SET msg = ? WHERE uuid = ?
+"""
 
 
-def _msg_uuids_having_tags(
-    conn: sqlite3.Connection, tag_groups, date_range=None
-) -> Set[uuid.UUID]:
-    msg_uuids = set()  # using a set in order to de-duplicate.
-
-    for tags in tag_groups:
-        if tags == ("",):
-            for row in conn.execute(SELECT_LOGS_HAVING_NO_TAGS):
-                msg_uuids.add(row[ID])
-        else:
-            select = format_template_tags_dates(
-                SELECT_LOGS_HAVING_TAGS_TEMPL,
-                tags,
-                date_col="logs.created_at",
-                date_range=date_range,
-            )
-            for row in conn.execute(select, (*tags, len(tags))):
-                msg_uuids.add(row[ID])
-
-    return msg_uuids
-
-
-def messages_with_tags(
-    conn: sqlite3.Connection,
-    tag_groups: List[Tuple[str, ...]],
-    date_range=None,
-    localtime=True,
-) -> List[Note]:
-    if not tag_groups or ((len(tag_groups) == 1) and not tag_groups[0]):
-        select = SELECT_LOGS_WITH_TAGS_ALL_TEMPL.format(
-            date_range=_format_date_range("logs.created_at", date_range),
-            datetime_modifier=", 'localtime'" if localtime else "",
-        )
-        cursor = conn.execute(select)
-    else:
-        msg_uuids = _msg_uuids_having_tags(conn, tag_groups, date_range=date_range)
-        select = SELECT_LOGS_AND_TAGS_TEMPL.format(
-            msgs=", ".join("?" for _ in msg_uuids),
-            datetime_modifier=", 'localtime'" if localtime else "",
-        )
-        cursor = conn.execute(select, tuple(msg_uuids))
-
-    return list(rows_to_notes(cursor.fetchall()))
+def update_msg(conn: sqlite3.Connection, msg_uuid: uuid.UUID, msg: str) -> bool:
+    c = conn.execute(UPDATE_LOG, (Gzip(msg), msg_uuid))
+    return c.rowcount == 1
 
 
 def msg_exists(conn: sqlite3.Connection, msg_uuid) -> bool:
@@ -1168,123 +1162,6 @@ def tag_statistics(conn: sqlite3.Connection) -> sqlite3.Cursor:
     with conn:
         results = conn.execute(SELECT_TAG_STATISTICS)
     return results
-
-
-SELECT_NOTES_WHERE_TEMPL = """
-SELECT
-    logs.uuid AS uuid,
-    datetime(logs.created_at{datetime_modifier}) AS "created_at [timestamp]",
-    logs.msg AS body,
-    group_concat(tags.tag) AS tags
-FROM logs
-LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
-LEFT JOIN tags ON tags.uuid = lt.tag_uuid
-WHERE
-    ({uuid_filter})
-AND ({tags_filter})
-AND ({text_filter})
-AND ({date_filter})
-GROUP BY logs.uuid, logs.created_at, logs.msg
-ORDER BY logs.created_at;
-"""
-
-_WHERE_UUIDS = """logs.uuid IN ({uuids})"""
-
-_WHERE_TAGS = """(logs.uuid in (
-    SELECT log_uuid
-    FROM logs_tags
-    WHERE tag_uuid in (
-        SELECT uuid
-        FROM tags
-        WHERE tag in ({tags})
-    )
-    GROUP BY log_uuid
-    HAVING COUNT(tag_uuid) >= ?))
-"""
-
-_WHERE_NO_TAGS = """(logs.uuid in (
-    SELECT logs.uuid
-    FROM logs
-    LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
-    WHERE lt.log_uuid is NULL))
-"""
-
-_WHERE_FTS = """logs.uuid in (
-    SELECT logs.uuid
-    FROM logs
-    INNER JOIN (
-        SELECT rowid
-        FROM logs_fts
-        WHERE logs_fts MATCH ?
-        ORDER BY rank) fts on fts.rowid = logs.rowid
-)
-"""
-
-
-def select_notes(
-    conn: sqlite3.Connection,
-    uuids: Optional[List[uuid.UUID]] = None,
-    tag_groups: Optional[List[Tuple[str, ...]]] = None,
-    date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
-    text: Optional[str] = None,
-    localtime: bool = True,
-) -> List[Note]:
-    params = []
-
-    # Where having uuids
-    uuid_filter = "1"
-    if uuids:
-        uuid_filter = _WHERE_UUIDS.format(uuids=", ".join("?" for _ in uuids))
-        params.extend(uuids)
-
-    # Where tagged with
-    tags_filter = "1"
-    if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
-        # TODO: The following can be improved for complex tag groupings.
-        tag_fragments = []
-        for tag_group in tag_groups:
-            # Check for notes having not tags.
-            if tag_group == ("",):
-                tag_fragments.append(_WHERE_NO_TAGS)
-            else:
-                tag_fragments.append(
-                    _WHERE_TAGS.format(tags=", ".join("?" for _ in tag_group))
-                )
-                params.extend((*tag_group, len(tag_group)))
-        tags_filter = " OR ".join(tag_fragments)
-
-    # Where contains the text
-    text_filter = "1"
-    if text:
-        text_filter = _WHERE_FTS
-        params.append(text)
-
-    # Where between dates
-    date_filter = "1"
-    if date_ranges:
-        date_filter = " OR ".join(
-            _DATE_BETWEEN_FRAGMENT.format(
-                column="logs.created_at", begin=date_range[0], end=date_range[1],
-            )
-            for date_range in date_ranges
-        )
-
-    # Format the datetime
-    datetime_modifier = ""
-    if localtime:
-        datetime_modifier = ", 'localtime'"
-
-    query = SELECT_NOTES_WHERE_TEMPL.format(
-        uuid_filter=uuid_filter,
-        tags_filter=tags_filter,
-        text_filter=text_filter,
-        date_filter=date_filter,
-        datetime_modifier=datetime_modifier,
-    )
-
-    print(f"Query:\n{query}\n\n{params}\n")
-
-    return list(rows_to_notes(conn.execute(query, params).fetchall()))
 
 
 # -----------------------------------------------------------------------------
@@ -1702,7 +1579,6 @@ def handle_tag_disassociate(
 
 
 def note_export(conn: sqlite3.Connection, outfile: io.TextIOWrapper) -> int:
-    #notes = messages_with_tags(conn, [], localtime=False)
     notes = select_notes(conn, localtime=False)
 
     writer = csv.DictWriter(outfile, Note._fields)
@@ -1878,7 +1754,6 @@ if __name__ == "__main__":
         tag_groups = [tg for tg in (args.tags or []) if tg]
         expanded_tag_groups = expand_tag_groups(conn, tag_groups)
 
-        #messages = messages_with_tags(conn, expanded_tag_groups, args.date_ranges)
         messages = select_notes(
             conn,
             tag_groups=expanded_tag_groups,
