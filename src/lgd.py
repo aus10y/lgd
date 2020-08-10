@@ -303,6 +303,10 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 """
 
+CREATE_CREATED_AT_INDEX = """
+CREATE INDEX IF NOT EXISTS created_at_idx ON logs (created_at);
+"""
+
 CREATE_TAGS_TABLE = """
 CREATE TABLE IF NOT EXISTS tags (
     uuid UUID PRIMARY KEY,
@@ -311,7 +315,7 @@ CREATE TABLE IF NOT EXISTS tags (
 """
 
 CREATE_TAG_INDEX = """
-CREATE INDEX IF NOT EXISTS tag_index ON tags (tag);
+CREATE INDEX IF NOT EXISTS tag_idx ON tags (tag);
 """
 
 CREATE_ASSOC_TABLE = """
@@ -326,11 +330,11 @@ CREATE TABLE IF NOT EXISTS logs_tags (
 """
 
 CREATE_ASSC_LOGS_INDEX = """
-CREATE INDEX IF NOT EXISTS assc_log_index ON logs_tags (log_uuid);
+CREATE INDEX IF NOT EXISTS assc_log_idx ON logs_tags (log_uuid);
 """
 
 CREATE_ASSC_TAGS_INDEX = """
-CREATE INDEX IF NOT EXISTS assc_tag_index ON logs_tags (tag_uuid);
+CREATE INDEX IF NOT EXISTS assc_tag_idx ON logs_tags (tag_uuid);
 """
 
 CREATE_TAG_RELATIONS_TABLE = """
@@ -342,6 +346,14 @@ CREATE TABLE IF NOT EXISTS tag_relations (
     FOREIGN KEY (tag_uuid_denoted) REFERENCES tags(uuid) ON DELETE CASCADE,
     UNIQUE(tag_uuid, tag_uuid_denoted)
 );
+"""
+
+CREATE_TAG_DIRECT_INDEX = """
+CREATE INDEX IF NOT EXISTS tag_direct_idx ON tag_relations (tag_uuid);
+"""
+
+CREATE_TAG_INDIRECT_INDEX = """
+CREATE INDEX IF NOT EXISTS tag_indirect_idx ON tag_relations (tag_uuid_denoted);
 """
 
 # Create the full text search table using the External-Content-Table syntax.
@@ -405,6 +417,7 @@ def set_user_version(conn: sqlite3.Connection, version: int, commit=True) -> int
 def db_init(conn):
     # Ensure logs table
     conn.execute(CREATE_LOGS_TABLE)
+    conn.execute(CREATE_CREATED_AT_INDEX)
 
     # Ensure tags table
     conn.execute(CREATE_TAGS_TABLE)
@@ -417,6 +430,8 @@ def db_init(conn):
 
     # Ensure tag relations table
     conn.execute(CREATE_TAG_RELATIONS_TABLE)
+    conn.execute(CREATE_TAG_DIRECT_INDEX)
+    conn.execute(CREATE_TAG_INDIRECT_INDEX)
 
     # Ensure full text search table & triggers
     conn.execute(CREATE_FTS_TABLE)
