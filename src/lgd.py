@@ -747,7 +747,7 @@ ORDER BY logs.created_at;
 
 _WHERE_UUIDS = """logs.uuid IN ({uuids})"""
 
-_WHERE_TAGS = """(logs.uuid in (
+_WHERE_TAGS_ALL = """(logs.uuid in (
     SELECT log_uuid
     FROM logs_tags
     WHERE tag_uuid in (
@@ -757,6 +757,17 @@ _WHERE_TAGS = """(logs.uuid in (
     )
     GROUP BY log_uuid
     HAVING COUNT(tag_uuid) >= ?))
+"""
+
+_WHERE_TAGS_ANY = """(logs.uuid in (
+    SELECT log_uuid
+    FROM logs_tags
+    WHERE tag_uuid in (
+        SELECT uuid
+        FROM tags
+        WHERE tag in ({tags})
+    )
+    GROUP BY log_uuid))
 """
 
 _WHERE_NO_TAGS = """(logs.uuid in (
@@ -773,13 +784,10 @@ _WHERE_FTS = """logs.uuid in (
         SELECT rowid
         FROM logs_fts
         WHERE logs_fts MATCH ?
-        ORDER BY rank) fts on fts.rowid = logs.rowid
-)
+        ORDER BY rank) fts on fts.rowid = logs.rowid)
 """
 
-_DATE_BETWEEN_FRAGMENT = """
-({column} BETWEEN '{begin}' AND '{end}')
-"""
+_DATE_BETWEEN_FRAGMENT = "({column} BETWEEN '{begin}' AND '{end}')"
 
 
 def select_notes(
@@ -803,15 +811,27 @@ def select_notes(
     if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
         # TODO: The following can be improved for complex tag groupings.
         tag_fragments = []
-        for tag_group in tag_groups:
-            # Check for notes having not tags.
-            if tag_group == ("",):
-                tag_fragments.append(_WHERE_NO_TAGS)
-            else:
-                tag_fragments.append(
-                    _WHERE_TAGS.format(tags=", ".join("?" for _ in tag_group))
-                )
-                params.extend((*tag_group, len(tag_group)))
+
+        # All tag groups containing one tag may be grouped together and OR'd.
+        tags_or = [tg[0] for tg in tag_groups if len(tg) == 1 and tg != ("",)]
+        tags_and = [tg for tg in tag_groups if len(tg) > 1]
+        tags_none = any(tg == ("",) for tg in tag_groups)
+
+        for tag_group in tags_and:
+            tag_fragments.append(
+                _WHERE_TAGS_ALL.format(tags=", ".join("?" for _ in tag_group))
+            )
+            params.extend((*tag_group, len(tag_group)))
+
+        if tags_or:
+            tag_fragments.append(
+                _WHERE_TAGS_ANY.format(tags=", ".join("?" for _ in tags_or))
+            )
+            params.extend(tags_or)
+
+        if tags_none:
+            tag_fragments.append(_WHERE_NO_TAGS)
+
         tags_filter = " OR ".join(tag_fragments)
 
     # Where contains the text
@@ -1088,11 +1108,16 @@ def select_related_tags(conn: sqlite3.Connection, tag) -> Set:
     return tags
 
 
-def expand_tag_groups(conn: sqlite3.Connection, tag_groups) -> List[Tuple[str, ...]]:
+def expand_tag_groups(
+    conn: sqlite3.Connection, tag_groups: List[List[str]]
+) -> List[Tuple[str, ...]]:
     """
     Given a set of "tag groups" (a list of lists of tags), expand those tags to
     include related tags, while maintaing the appropriate AND and OR
     relationships between the groups.
+
+    We operate with the assumption that the sub-lists shall be OR'd together
+    while the tags within each sub-list shall be AND'd.
     """
     expanded_groups = []
     for tag_group in tag_groups:
@@ -1104,7 +1129,14 @@ def expand_tag_groups(conn: sqlite3.Connection, tag_groups) -> List[Tuple[str, .
         # Find the product of the groups of related tags.
         expanded_groups.extend(list(itertools.product(*related_groups)))
 
-    return expanded_groups
+    # Due to tag-associations, it's possible for an expanded sub-tuple to
+    # consist of a repeated tag. We'll take a step here to reduce these groups
+    # as there is no benefit to this repetition.
+    groups: List[Tuple[str, ...]] = [
+        group if len(set(group)) > 1 else (group[0],) for group in expanded_groups
+    ]
+
+    return groups
 
 
 SELECT_TAG_STATISTICS = """
