@@ -2,8 +2,6 @@
 
 # What is the algorithm for completion?
 # For now we'll only try to provide completions when the last command arg is -t
-#
-
 
 _lgd_completions() {
     args=()
