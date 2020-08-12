@@ -824,7 +824,6 @@ def select_notes(
     # Where tagged with
     tags_filter = "1"
     if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
-        # TODO: The following can be improved for complex tag groupings.
         tag_fragments = []
 
         # All tag groups containing one tag may be grouped together and OR'd.
