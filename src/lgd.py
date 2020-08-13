@@ -142,7 +142,10 @@ parser.add_argument(
     "--delete",
     action="store",
     type=str,
-    help="Delete the message with the given ID.",
+    help=(
+        "Delete note(s) matching the given UUID or UUID prefix. Confirmation"
+        " of delete is requested for any notes found matching the value."
+    ),
 )
 parser.add_argument(
     "-d",
@@ -203,8 +206,8 @@ parser.add_argument(
     help=("Disable rendering of note metadata in the editor."),
 )
 parser.add_argument(
-    "-T",
-    "--tags",
+    "-S",
+    "--statistics",
     action="store_true",
     default=False,
     dest="tag_stats",
@@ -258,7 +261,7 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "-M",
+    "-m",
     "--meta",
     dest="metadata",
     action="store_true",
@@ -1624,9 +1627,9 @@ def handle_tag_disassociate(
                 )
 
 
-def note_export(conn: sqlite3.Connection, outfile: io.TextIOWrapper) -> int:
-    notes = select_notes(conn, localtime=False)
-
+def note_export(
+    conn: sqlite3.Connection, notes: List[Note], outfile: io.TextIOWrapper
+) -> int:
     writer = csv.DictWriter(outfile, Note._fields)
     writer.writeheader()
     for note in notes:
@@ -1714,11 +1717,16 @@ if __name__ == "__main__":
         print("Failed to finish database setup!")
         sys.exit()
 
-    if args.note_file_out:
-        with open(args.note_file_out, "w") as outfile:
-            num = note_export(conn, outfile)
-        print(f" - Exported {num} notes to {args.note_file_out}")
-        sys.exit()
+    # Apply the users filters to select the notes/messages
+    tag_groups = [tg for tg in (args.tags or []) if tg]
+    expanded_tag_groups = expand_tag_groups(conn, tag_groups)
+
+    messages = select_notes(
+        conn,
+        tag_groups=expanded_tag_groups,
+        date_ranges=args.date_ranges,
+        text=args.search,
+    )
 
     if args.note_file_in:
         with open(args.note_file_in, "r") as infile:
@@ -1729,31 +1737,31 @@ if __name__ == "__main__":
         print(
             f" - Inserted {inserted}, updated {updated} notes from {args.note_file_in}"
         )
-        sys.exit()
-
-    if args.tag_file_out:
-        with open(args.tag_file_out, "w") as outfile:
-            num = tag_export(conn, outfile)
-        print(f" - Exported {num} tag relations to {args.tag_file_out}")
-        sys.exit()
 
     if args.tag_file_in:
         with open(args.tag_file_in, "r") as infile:
             inserted, existing = tag_import(conn, infile)
             total = inserted + existing
         print(f" - Inserted {inserted} of {total} relations from {args.tag_file_in}")
-        sys.exit()
+
+    if args.note_file_out:
+        with open(args.note_file_out, "w") as outfile:
+            num = note_export(conn, messages, outfile)
+        print(f" - Exported {num} notes to {args.note_file_out}")
+
+    if args.tag_file_out:
+        with open(args.tag_file_out, "w") as outfile:
+            num = tag_export(conn, outfile)
+        print(f" - Exported {num} tag relations to {args.tag_file_out}")
 
     if args.tag_stats:
         stats = format_tag_statistics(tag_statistics(conn))
         for line in stats:
             print(line)
-        sys.exit()
 
     if args.tag_associate or args.tag_disassociate:
         handle_tag_associate(conn, (args.tag_associate or []))
         handle_tag_disassociate(conn, (args.tag_disassociate or []))
-        sys.exit()
 
     if args.delete is not None:
         uuid_prefix = args.delete.replace("-", "")
@@ -1773,6 +1781,17 @@ if __name__ == "__main__":
                         print(" - Failed to delete")
         else:
             print(f"No message UUID prefixed with '{args.delete}'")
+
+    if any(
+        (
+            args.note_file_in,
+            args.note_file_out,
+            args.tag_file_in,
+            args.tag_file_out,
+            args.tag_stats,
+            args.delete,
+        )
+    ):
         sys.exit()
 
     # If reading from stdin
@@ -1797,16 +1816,6 @@ if __name__ == "__main__":
 
     # Display messages
     if args.tags or args.date_ranges or args.search:
-        tag_groups = [tg for tg in (args.tags or []) if tg]
-        expanded_tag_groups = expand_tag_groups(conn, tag_groups)
-
-        messages = select_notes(
-            conn,
-            tag_groups=expanded_tag_groups,
-            date_ranges=args.date_ranges,
-            text=args.search,
-        )
-
         if args.metadata:
             # Print Note metadata
             for msg in messages:
