@@ -288,8 +288,9 @@ class TestCSVNoteExport(unittest.TestCase):
 
     def test_note_export(self):
         # Check number of exported notes
+        notes = lgd.select_notes(self.conn, localtime=False)
         outfile = io.StringIO()
-        num_exported = lgd.note_export(self.conn, outfile)
+        num_exported = lgd.note_export(self.conn, notes, outfile)
 
         self.assertEqual(num_exported, len(NOTES))
 
@@ -299,8 +300,9 @@ class TestCSVNoteExport(unittest.TestCase):
         self.assertEqual(len(notes1), len(NOTES))
 
         # Export from the setUp DB.
+        notes = lgd.select_notes(self.conn, localtime=False)
         notefile = io.StringIO()
-        _ = lgd.note_export(self.conn, notefile)
+        _ = lgd.note_export(self.conn, notes, notefile)
         notefile.seek(0)
 
         # Set up a second DB
