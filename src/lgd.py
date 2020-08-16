@@ -15,7 +15,7 @@ import tempfile
 import uuid
 
 from collections import namedtuple
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from subprocess import call
 from typing import (
@@ -140,11 +140,24 @@ parser.add_argument(
 parser.add_argument(
     "-D",
     "--delete",
-    action="store",
+    nargs="+",
     type=str,
     help=(
         "Delete note(s) matching the given UUID or UUID prefix. Confirmation"
-        " of delete is requested for any notes found matching the value."
+        " of delete is requested for any notes found matching the value. If"
+        " the -y/--yes flag is given, UUID arguments found to have one matching"
+        " note will be deleted without a confirmation prompt, and UUID args"
+        " matching more than one note will require confirmation from the user."
+    ),
+)
+parser.add_argument(
+    "-y",
+    "--yes",
+    action="store_true",
+    default=False,
+    dest="confirmation_override",
+    help=(
+        "Used to provide affirmative confirmation in place of an interactive prompt."
     ),
 )
 parser.add_argument(
@@ -600,9 +613,9 @@ def flatten_tag_groups(tag_groups: Iterable[Tuple[str, ...]]) -> List[str]:
 def prompt_for_delete(msg: sqlite3.Row, uuid_prefix: str) -> bool:
     # TODO: Improve uuid highlighting. Currently doesn't work for whole uuids.
     uuid_fragment = Term.apply_where(Term.green, uuid_prefix, str(msg[ID])[:8])
-    msg_fragment = msg[MSG][:46].replace("\n", "\\n")
+    msg_fragment = msg[MSG][:46].replace("\n", "\\n")[:46].ljust(49, ".")
 
-    prompt = f'{Term.warning("Delete")} {uuid_fragment}..., "{msg_fragment}..." (Y/n) '
+    prompt = f'{Term.warning("Delete")} {uuid_fragment}..., "{msg_fragment}" [Y/n] '
     return input(prompt).lower() == "y"
 
 
@@ -694,6 +707,50 @@ def rows_to_notes(rows: List[sqlite3.Row]) -> Generator["Note", None, None]:
     return (
         Note(r["uuid"], r["created_at"], r["body"], split_tags(r["tags"])) for r in rows
     )
+
+
+def ui_delete_notes(
+    conn: sqlite3.Connection,
+    uuid_args: List[str],
+    override: bool = False,
+    override_strong: bool = False,
+):
+    def confirm_single(note, prefix):
+        try:
+            return override or prompt_for_delete(note, prefix)
+        except (EOFError, KeyboardInterrupt):
+            print("")
+            sys.exit()
+
+    def confirm_multi(note, prefix):
+        try:
+            return override_strong or prompt_for_delete(note, prefix)
+        except (EOFError, KeyboardInterrupt):
+            print("")
+            sys.exit()
+
+    uuid_prefixes = [uuid_arg.replace("-", "") for uuid_arg in uuid_args]
+    notes_matched = [
+        (uuid_prefix, select_msgs_from_uuid_prefix(conn, uuid_prefix))
+        for uuid_prefix in uuid_prefixes
+    ]
+
+    for uuid_prefix, notes in notes_matched:
+        if not notes:
+            print(f"{uuid_prefix}, No note found")
+            continue
+
+        if len(notes) == 1:
+            get_confirmation = confirm_single
+        else:
+            get_confirmation = confirm_multi
+
+        for note in notes:
+            if get_confirmation(note, uuid_prefix):
+                if delete_msg(conn, note[ID]):
+                    print(f" - Deleted {note[ID]}")
+                else:
+                    print(f" - Failed to delete {note[ID]}")
 
 
 # -----------------------------------------------------------------------------
@@ -1764,23 +1821,7 @@ if __name__ == "__main__":
         handle_tag_disassociate(conn, (args.tag_disassociate or []))
 
     if args.delete is not None:
-        uuid_prefix = args.delete.replace("-", "")
-        msgs = select_msgs_from_uuid_prefix(conn, uuid_prefix)
-        if msgs:
-            for msg in msgs:
-                try:
-                    confirmed = prompt_for_delete(msg, uuid_prefix)
-                except EOFError:
-                    print("")
-                    sys.exit()
-
-                if confirmed:
-                    if delete_msg(conn, msg[ID]):
-                        print(" - Deleted")
-                    else:
-                        print(" - Failed to delete")
-        else:
-            print(f"No message UUID prefixed with '{args.delete}'")
+        ui_delete_notes(conn, args.delete, args.confirmation_override)
 
     if any(
         (
