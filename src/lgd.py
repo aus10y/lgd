@@ -485,7 +485,16 @@ def db_setup(
 
 
 # -----------------------------------------------------------------------------
-# Autocompleting Tag Prompt
+# Types
+
+Note = namedtuple("Note", ("uuid", "created_at", "body", "tags"))
+
+Tag = namedtuple("Tag", ("uuid", "value"))
+
+TagRelation = namedtuple("TagRelation", ("direct", "indirect"))
+
+# -----------------------------------------------------------------------------
+# Misc. Utilities
 
 
 class TagPrompt(cmd.Cmd):
@@ -535,10 +544,6 @@ class TagPrompt(cmd.Cmd):
         return self._final_tags
 
 
-# -----------------------------------------------------------------------------
-# Terminal Color Helpers
-
-
 class Term:
     HEADER = "\033[95m"
     OKBLUE = "\033[94m"
@@ -582,10 +587,6 @@ class Term:
         color_func: Callable[[str], str], sub_string: str, text: str
     ) -> str:
         return text.replace(sub_string, color_func(sub_string))
-
-
-# -----------------------------------------------------------------------------
-# Misc. Utilities
 
 
 class Gzip(str):
@@ -703,7 +704,7 @@ def split_tags(tags: Union[str, None]) -> FrozenSet[str]:
     return frozenset(t.strip() for t in tags.split(",")) if tags else frozenset()
 
 
-def rows_to_notes(rows: List[sqlite3.Row]) -> Generator["Note", None, None]:
+def rows_to_notes(rows: List[sqlite3.Row]) -> Generator[Note, None, None]:
     return (
         Note(r["uuid"], r["created_at"], r["body"], split_tags(r["tags"])) for r in rows
     )
@@ -768,14 +769,9 @@ def stdin_note() -> str:
     return "".join(lines)
 
 
-# -----------------------------------------------------------------------------
-# Types
-
-Note = namedtuple("Note", ("uuid", "created_at", "body", "tags"))
-
-Tag = namedtuple("Tag", ("uuid", "value"))
-
-TagRelation = namedtuple("TagRelation", ("direct", "indirect"))
+def get_metadata(note: Note) -> str:
+    tags = ",".join(sorted(note.tags))
+    return f'{note.uuid},{note.created_at},"{tags}"'
 
 
 # -----------------------------------------------------------------------------
@@ -1789,6 +1785,7 @@ if __name__ == "__main__":
         print("Failed to finish database setup!")
         sys.exit()
 
+    # ------------------------------------------------------------------------
     # Apply the users filters to select the notes/messages
     tag_groups = [tg for tg in (args.tags or []) if tg]
     expanded_tag_groups = expand_tag_groups(conn, tag_groups)
@@ -1850,6 +1847,7 @@ if __name__ == "__main__":
     ):
         sys.exit()
 
+    # ------------------------------------------------------------------------
     # If reading from stdin
     if args.dash:
         msg = stdin_note()
@@ -1862,16 +1860,16 @@ if __name__ == "__main__":
         print(f"Saved as message ID {msg_uuid}")
         sys.exit()
 
+    # ------------------------------------------------------------------------
+    # Print Note metadata (uuid, created_at, tags)
+    if args.metadata:
+        for msg in messages:
+            print(get_metadata(msg))
+        sys.exit()
+
+    # ------------------------------------------------------------------------
     # Display notes matching filters
     if args.tags or args.date_ranges or args.search:
-        if args.metadata:
-            # Print Note metadata
-            for msg in messages:
-                tags = ",".join(sorted(msg.tags))
-                print(f'{msg.uuid},{msg.created_at},"{tags}"')
-
-            sys.exit()
-
         message_view = RenderedLog(
             messages, tag_groups, expanded_tag_groups, style=(not args.plain)
         )
@@ -1892,6 +1890,7 @@ if __name__ == "__main__":
         conn.commit()
         sys.exit()
 
+    # ------------------------------------------------------------------------
     # Quick note
     msg = open_temp_logfile()
     if not msg:
