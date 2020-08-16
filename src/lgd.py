@@ -717,7 +717,7 @@ def ui_delete_notes(
 ):
     def confirm_single(note, prefix):
         try:
-            return override or prompt_for_delete(note, prefix)
+            return override or override_strong or prompt_for_delete(note, prefix)
         except (EOFError, KeyboardInterrupt):
             print("")
             sys.exit()
@@ -751,6 +751,21 @@ def ui_delete_notes(
                     print(f" - Deleted {note[ID]}")
                 else:
                     print(f" - Failed to delete {note[ID]}")
+
+
+def stdin_note() -> str:
+    lines = []
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        lines.append(line)
+
+        # Print the lines back to stdout, so that this tool may be better
+        # composed with other command line tools.
+        print(line, end="")
+
+    return "".join(lines)
 
 
 # -----------------------------------------------------------------------------
@@ -1837,15 +1852,7 @@ if __name__ == "__main__":
 
     # If reading from stdin
     if args.dash:
-        lines = []
-        while True:
-            line = sys.stdin.readline()
-            if not line:
-                break
-            print(line, end="")
-            lines.append(line)
-
-        msg = "".join(lines)
+        msg = stdin_note()
         msg_uuid = insert_msg(conn, msg)
         if args.tags:
             tags = flatten_tag_groups(args.tags)
@@ -1855,7 +1862,7 @@ if __name__ == "__main__":
         print(f"Saved as message ID {msg_uuid}")
         sys.exit()
 
-    # Display messages
+    # Display notes matching filters
     if args.tags or args.date_ranges or args.search:
         if args.metadata:
             # Print Note metadata
@@ -1885,7 +1892,7 @@ if __name__ == "__main__":
         conn.commit()
         sys.exit()
 
-    # Store message
+    # Quick note
     msg = open_temp_logfile()
     if not msg:
         print("No message created...")
