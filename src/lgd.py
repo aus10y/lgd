@@ -611,13 +611,18 @@ def flatten_tag_groups(tag_groups: Iterable[Tuple[str, ...]]) -> List[str]:
     return tags
 
 
+def user_confirmation(prompt: str) -> bool:
+    response = input(prompt).lower()
+    return response == "y" or response == "yes"
+
+
 def prompt_for_delete(msg: sqlite3.Row, uuid_prefix: str) -> bool:
     # TODO: Improve uuid highlighting. Currently doesn't work for whole uuids.
     uuid_fragment = Term.apply_where(Term.green, uuid_prefix, str(msg[ID])[:8])
     msg_fragment = msg[MSG][:46].replace("\n", "\\n")[:46].ljust(49, ".")
 
     prompt = f'{Term.warning("Delete")} {uuid_fragment}..., "{msg_fragment}" [Y/n] '
-    return input(prompt).lower() == "y"
+    return user_confirmation(prompt)
 
 
 def open_temp_logfile(lines: Union[List[str], None] = None) -> str:
@@ -1873,19 +1878,29 @@ if __name__ == "__main__":
         message_view = RenderedLog(
             messages, tag_groups, expanded_tag_groups, style=(not args.plain)
         )
-        edited = open_temp_logfile(message_view.rendered)
-        diffs = message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
-        for diff in diffs:
-            if diff.modified:
-                if DEBUG:
-                    print(repr(diff))
 
-                # TODO: Delete msg if all lines removed?
-                diff.update_or_create(conn, commit=False)
-                if diff.is_new:
-                    print(f"Saved additional message as ID {diff.msg_uuid}")
-                else:
-                    print(f"Saved changes to message ID {diff.msg_uuid}")
+        # The users editor is opened here, and may be open for an extended
+        # period of time. Close the database and get a new connection
+        # afterward.
+        conn.close()
+        edited = open_temp_logfile(message_view.rendered)
+        conn = get_connection(str(DB_PATH))
+
+        diffs = (
+            diff
+            for diff in message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
+            if diff.modified
+        )
+        for diff in diffs:
+            if DEBUG:
+                print(repr(diff))
+
+            # TODO: Delete msg if all lines removed?
+            diff.update_or_create(conn, commit=False)
+            if diff.is_new:
+                print(f"Saved additional message as ID {diff.msg_uuid}")
+            else:
+                print(f"Saved changes to message ID {diff.msg_uuid}")
 
         conn.commit()
         sys.exit()
