@@ -22,7 +22,7 @@ _lgd_completions() {
     # Check if the "current" arg is -t/--tags
     if [[ ${args[-1]} == "-t" ]] || [[ ${args[-1]} == "--tags" ]]; then
         # Parse out the tags column, skipping the header row
-        tags_raw=$(lgd -T | awk -e '{ if (NR > 1) { print $1 } }')
+        tags_raw=$(lgd -S | awk -e '{ if (NR > 1) { print $1 } }')
         
         # Strip empty lines and terminal color codes
         tags=$(echo $tags_raw | sed -e '/^$/ d' -e 's/\x1b\[[0-9;]*m//g')
