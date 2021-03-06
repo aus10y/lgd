@@ -9,15 +9,17 @@ import itertools
 import os
 import re
 import shlex
+import subprocess
+from subprocess import TimeoutExpired
 import sys
 import sqlite3
 import tempfile
+import time
 import uuid
 
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
-from subprocess import call
 from typing import (
     Callable,
     FrozenSet,
@@ -632,7 +634,7 @@ def open_temp_logfile(lines: Union[List[str], None] = None) -> str:
             tf.flush()
         tf.close()
 
-        call([*(shlex.split(EDITOR)), tf.name])
+        subprocess.call([*(shlex.split(EDITOR)), tf.name])
 
         with open(tf.name) as f:
             contents = f.read()
@@ -640,6 +642,64 @@ def open_temp_logfile(lines: Union[List[str], None] = None) -> str:
         os.unlink(tf.name)
 
     return contents
+
+
+def note_diffs(
+    messages: Iterable[Note],
+    tag_groups: List,
+    expanded_tag_groups: List,
+    style: bool = True,
+) -> Generator[List["LogDiff"], None, None]:
+
+    # TODO: 2021/03/06: Regenerate the RenderedLog after each time the file has
+    # been saved.
+
+    message_view = RenderedLog(messages, tag_groups, expanded_tag_groups, style=style)
+
+    with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tf:
+        tf.writelines(line.encode("utf8") for line in message_view.rendered)
+        tf.flush()
+        tf.close()
+
+        last_mtime = os.path.getmtime(tf.name)
+
+        # Launch the editor in a subprocess.
+        with subprocess.Popen([*(shlex.split(EDITOR)), tf.name]) as proc:
+            terminated = False
+            while not terminated:
+                try:
+                    terminated = proc.wait(timeout=None) is not None
+                except TimeoutExpired:
+                    pass
+
+                # Determine if the file has been modified
+                curr_mtime = os.path.getmtime(tf.name)
+                if curr_mtime == last_mtime:
+                    continue
+
+                last_mtime = curr_mtime
+
+                # Read the new contents
+                with open(tf.name) as f:
+                    edited = f.read()
+
+                # Produce the note diffs
+                diffs = [
+                    diff
+                    for diff in message_view.diff(
+                        edited.splitlines(keepends=True), debug=DEBUG
+                    )
+                    if diff.modified
+                ]
+                yield diffs
+
+                if not diffs:
+                    continue
+
+                # Reset the RenderedLog to account for the modified notes.
+                pass
+
+        os.unlink(tf.name)
 
 
 def format_tag_statistics(cur: sqlite3.Cursor) -> List[str]:
@@ -935,7 +995,9 @@ def select_notes(
     if date_ranges:
         date_filter = " OR ".join(
             _DATE_BETWEEN_FRAGMENT.format(
-                column="logs.created_at", begin=date_range[0], end=date_range[1],
+                column="logs.created_at",
+                begin=date_range[0],
+                end=date_range[1],
             )
             for date_range in date_ranges
         )
@@ -1300,6 +1362,7 @@ class RenderedLog:
         tag_groups: List[Tuple[str, ...]],
         expanded_tag_groups: List[Tuple[str, ...]],
         style: bool = True,
+        top_header: bool = True,
     ):
         """
         logs: A list/tuple, of 2-tuples (uuid, message)
@@ -1312,11 +1375,11 @@ class RenderedLog:
         self._styled = style
         self._lines = []
         self._line_map = []
-        self._render(style)  # Set up self._lines and self._lines_map
+        self._render(style, top_header)  # Set up self._lines and self._lines_map
 
-    def _render(self, style: bool):
+    def _render(self, style: bool, top_header: bool):
         # Header
-        if style and self.tag_groups:
+        if style and top_header and self.tag_groups:
             self._lines.append(RenderedLog._editor_header(self.expanded_tag_groups))
 
         # Body
@@ -1380,7 +1443,7 @@ class RenderedLog:
         return footer
 
     @property
-    def rendered(self):
+    def rendered(self) -> List[str]:
         return self._lines
 
     @staticmethod
@@ -1462,12 +1525,13 @@ class RenderedLog:
         raw_tags = (t.strip() for t in line[len(TAG_LINE) :].split(","))
         return {t for t in raw_tags if t}
 
-    def diff(self, other: Iterable[str], debug=False):
+    def diff(self, other: Iterable[str], debug=False) -> List["LogDiff"]:
         """
         return an iterable of LogDiffs
         """
         line_num, diff_index = 0, 0
-        msg_diff, log_diffs = [], []
+        msg_diff = []
+        log_diffs: List[LogDiff] = []
 
         diff = difflib.ndiff(self._lines, list(other))
         diff = list(RenderedLog._enumerate_diff(diff))
@@ -1753,7 +1817,10 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
         else:
             # Insert
             _ = insert_msg(
-                conn, note.body, msg_uuid=note.uuid, created_at=note.created_at,
+                conn,
+                note.body,
+                msg_uuid=note.uuid,
+                created_at=note.created_at,
             )
             inserted += 1
 
@@ -1863,6 +1930,7 @@ if __name__ == "__main__":
             insert_asscs(conn, msg_uuid, tag_uuids)
 
         print(f"Saved as message ID {msg_uuid}")
+        conn.close()
         sys.exit()
 
     # ------------------------------------------------------------------------
@@ -1883,26 +1951,35 @@ if __name__ == "__main__":
         # period of time. Close the database and get a new connection
         # afterward.
         conn.close()
-        edited = open_temp_logfile(message_view.rendered)
+        """edited = open_temp_logfile(message_view.rendered)
         conn = get_connection(str(DB_PATH))
 
         diffs = (
             diff
             for diff in message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
             if diff.modified
+        )"""
+        note_diffs_gen = note_diffs(
+            messages, tag_groups, expanded_tag_groups, style=(not args.plain)
         )
-        for diff in diffs:
-            if DEBUG:
-                print(repr(diff))
 
-            # TODO: Delete msg if all lines removed?
-            diff.update_or_create(conn, commit=False)
-            if diff.is_new:
-                print(f"Saved additional message as ID {diff.msg_uuid}")
-            else:
-                print(f"Saved changes to message ID {diff.msg_uuid}")
+        for diffs in note_diffs_gen:
+            conn = get_connection(str(DB_PATH))
 
-        conn.commit()
+            for diff in diffs:
+                if DEBUG:
+                    print(repr(diff))
+
+                # TODO: Delete msg if all lines removed?
+                diff.update_or_create(conn, commit=False)
+                if diff.is_new:
+                    print(f"Saved additional message as ID {diff.msg_uuid}")
+                else:
+                    print(f"Saved changes to message ID {diff.msg_uuid}")
+
+            conn.commit()
+            conn.close()
+
         sys.exit()
 
     # ------------------------------------------------------------------------
@@ -1924,3 +2001,4 @@ if __name__ == "__main__":
         insert_asscs(conn, msg_uuid, tag_uuids)
 
     print(f"Saved as message ID {msg_uuid}")
+    conn.close()
