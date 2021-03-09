@@ -645,17 +645,16 @@ def open_temp_logfile(lines: Union[List[str], None] = None) -> str:
 
 
 def note_diffs(
+    conn_factory,
     messages: Iterable[Note],
     tag_groups: List,
     expanded_tag_groups: List,
     style: bool = True,
 ) -> Generator[List["LogDiff"], None, None]:
 
-    # TODO: 2021/03/06: Regenerate the RenderedLog after each time the file has
-    # been saved.
-
     message_view = RenderedLog(messages, tag_groups, expanded_tag_groups, style=style)
 
+    new_note = None
     with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tf:
         tf.writelines(line.encode("utf8") for line in message_view.rendered)
         tf.flush()
@@ -668,7 +667,7 @@ def note_diffs(
             terminated = False
             while not terminated:
                 try:
-                    terminated = proc.wait(timeout=None) is not None
+                    terminated = proc.wait(timeout=3) is not None
                 except TimeoutExpired:
                     pass
 
@@ -683,23 +682,34 @@ def note_diffs(
                 with open(tf.name) as f:
                     edited = f.read()
 
-                # Produce the note diffs
-                diffs = [
-                    diff
-                    for diff in message_view.diff(
-                        edited.splitlines(keepends=True), debug=DEBUG
-                    )
-                    if diff.modified
-                ]
-                yield diffs
+                diffs = message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
+                if diffs:
+                    if diffs[-1].is_new:
+                        new_note = diffs[-1]
+                    elif new_note is not None:
+                        new_note = None
 
-                if not diffs:
+                # Produce the note diffs. We filter out the new note, if it
+                # exists, because we don't want to yield it at this point.
+                changes = [d for d in diffs if d.modified and not d.is_new]
+
+                if not changes:
                     continue
 
+                yield changes
+
                 # Reset the RenderedLog to account for the modified notes.
-                pass
+                message_view = RenderedLog(
+                    select_notes(conn_factory(), uuids=[m.uuid for m in messages]),
+                    tag_groups,
+                    expanded_tag_groups,
+                    style=style,
+                )
 
         os.unlink(tf.name)
+
+    if new_note is not None:
+        yield [new_note]
 
 
 def format_tag_statistics(cur: sqlite3.Cursor) -> List[str]:
@@ -1943,26 +1953,21 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------------
     # Display notes matching filters
     if args.tags or args.date_ranges or args.search:
-        message_view = RenderedLog(
-            messages, tag_groups, expanded_tag_groups, style=(not args.plain)
-        )
 
         # The users editor is opened here, and may be open for an extended
         # period of time. Close the database and get a new connection
         # afterward.
         conn.close()
-        """edited = open_temp_logfile(message_view.rendered)
-        conn = get_connection(str(DB_PATH))
 
-        diffs = (
-            diff
-            for diff in message_view.diff(edited.splitlines(keepends=True), debug=DEBUG)
-            if diff.modified
-        )"""
         note_diffs_gen = note_diffs(
-            messages, tag_groups, expanded_tag_groups, style=(not args.plain)
+            lambda: get_connection(str(DB_PATH)),
+            messages,
+            tag_groups,
+            expanded_tag_groups,
+            style=(not args.plain),
         )
 
+        notifications = []
         for diffs in note_diffs_gen:
             conn = get_connection(str(DB_PATH))
 
@@ -1973,12 +1978,20 @@ if __name__ == "__main__":
                 # TODO: Delete msg if all lines removed?
                 diff.update_or_create(conn, commit=False)
                 if diff.is_new:
-                    print(f"Saved additional message as ID {diff.msg_uuid}")
+                    notifications.append(
+                        f"Saved additional message as ID {diff.msg_uuid}"
+                    )
                 else:
-                    print(f"Saved changes to message ID {diff.msg_uuid}")
+                    notifications.append(f"Saved changes to message ID {diff.msg_uuid}")
 
             conn.commit()
             conn.close()
+
+        # Messages / notification to user are deferred until the editor is
+        # closed, so that output to stdout (via print) will not interfere
+        # with terminal editors.
+        for notification in notifications:
+            print(notification)
 
         sys.exit()
 
