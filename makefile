@@ -39,8 +39,8 @@ ${LGD}: ${LGD_PY}
 	@chmod +x ${LGD}
 	@rm ~/.lgd/logs.db
 	@echo "Restoring..."
-	@lgd -NI ${BACKUP_NOTES}
-	@lgd -TI ${BACKUP_TAGS}
+	@lgd --note-import ${BACKUP_NOTES}
+	@lgd --tag-import ${BACKUP_TAGS}
 	@touch ${BACKUP_NOTES} ${BACKUP_TAGS}
 
 update: backup ${LGD}
@@ -50,9 +50,9 @@ test:
 	@${LGD_TESTS}
 
 ${BACKUP_NOTES}: ${LGD_DB}
-	@lgd -NE ${BACKUP_NOTES}
+	@lgd --note-export ${BACKUP_NOTES}
 
 ${BACKUP_TAGS}: ${LGD_DB}
-	@lgd -TE ${BACKUP_TAGS}
+	@lgd --tag-export ${BACKUP_TAGS}
 
 backup: ${BACKUP_NOTES} ${BACKUP_TAGS}

@@ -194,7 +194,6 @@ parser.add_argument(
     help=("Take input from STDIN, echo to STDOUT."),
 )
 parser.add_argument(
-    "-TA",
     "--tag-associate",
     dest="tag_associate",
     action="append",
@@ -207,7 +206,6 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "-TD",
     "--tag-disassociate",
     dest="tag_disassociate",
     action="append",
@@ -230,7 +228,6 @@ parser.add_argument(
     help=("Print tag statistics."),
 )
 parser.add_argument(
-    "-NI",
     "--note-import",
     dest="note_file_in",
     action="store",
@@ -243,7 +240,6 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "-NE",
     "--note-export",
     dest="note_file_out",
     action="store",
@@ -254,7 +250,6 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "-TI",
     "--tag-import",
     dest="tag_file_in",
     action="store",
@@ -266,7 +261,6 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "-TE",
     "--tag-export",
     dest="tag_file_out",
     action="store",
