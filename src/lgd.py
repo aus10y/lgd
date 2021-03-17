@@ -646,6 +646,10 @@ def open_temp_logfile(lines: Union[List[str], None] = None) -> str:
 
 
 def editor(body: List[str]) -> Generator[List[str], None, None]:
+    """
+    Launch the users editor and yield the body of the editor as lines of text
+    when a change is detected.
+    """
     with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tf:
         tf.writelines(line.encode("utf8") for line in body)
         tf.flush()
@@ -1329,7 +1333,7 @@ def tag_statistics(conn: sqlite3.Connection) -> sqlite3.Cursor:
 # Rendering and Diffing logs
 
 
-class RenderedLog:
+class EditorView:
 
     _TAG_REGEX: Pattern[str] = re.compile(r".*\([Tt]ags:\s*(?P<tags>.*)\)")
 
@@ -1357,14 +1361,14 @@ class RenderedLog:
     def _render(self, style: bool, top_header: bool):
         # Header
         if style and top_header and self.tag_groups:
-            self._lines.append(RenderedLog._editor_header(self.expanded_tag_groups))
+            self._lines.append(EditorView._editor_header(self.expanded_tag_groups))
 
         # Body
         linenum_init, linenum_last = None, None
         for note in self.notes:
             # Set the header for each message.
             if style:
-                self._lines.extend(RenderedLog._note_header(note))
+                self._lines.extend(EditorView._note_header(note))
                 linenum_init = len(self._lines) - 1
             else:
                 linenum_init = len(self._lines)
@@ -1372,7 +1376,7 @@ class RenderedLog:
             self._lines.extend(note.body.splitlines(keepends=True))
 
             if style:
-                self._lines.extend(RenderedLog._note_footer(note))
+                self._lines.extend(EditorView._note_footer(note))
 
             linenum_last = len(self._lines)
 
@@ -1380,7 +1384,7 @@ class RenderedLog:
 
         # Footer
         if style:
-            self._lines.extend(RenderedLog._editor_footer(set(self._tags_flat)))
+            self._lines.extend(EditorView._editor_footer(set(self._tags_flat)))
 
     @staticmethod
     def _editor_header(tag_groups: List[Tuple[str, ...]]):
@@ -1441,7 +1445,7 @@ class RenderedLog:
 
     @staticmethod
     def _is_modification(line: str) -> bool:
-        return RenderedLog._is_addition(line) or RenderedLog._is_removal(line)
+        return EditorView._is_addition(line) or EditorView._is_removal(line)
 
     @staticmethod
     def _enumerate_diff(
@@ -1451,11 +1455,11 @@ class RenderedLog:
         line_num = 0
 
         for line in diff_lines:
-            if RenderedLog._is_intraline(line):
+            if EditorView._is_intraline(line):
                 # These intraline differences are not needed.
                 continue
 
-            if RenderedLog._is_addition(line):
+            if EditorView._is_addition(line):
                 yield (line_num, line)
             else:
                 if first_line:
@@ -1511,7 +1515,7 @@ class RenderedLog:
         log_diffs: List[LogDiff] = []
 
         diff = difflib.ndiff(self._lines, list(other))
-        diff = list(RenderedLog._enumerate_diff(diff))
+        diff = list(EditorView._enumerate_diff(diff))
 
         line_num, text = diff[diff_index]
 
@@ -1522,7 +1526,7 @@ class RenderedLog:
             for line_num, text in diff[diff_index:]:
                 if line_num < line_from:
                     # Check for tag changes
-                    tags = RenderedLog._parse_tags(text)
+                    tags = EditorView._parse_tags(text)
                     if tags is not None:
                         if text.startswith("-"):
                             tags_original = tags
@@ -1533,7 +1537,7 @@ class RenderedLog:
                 elif line_num == line_from:
                     # Handle leading synthetic newline
                     if self._styled:
-                        if RenderedLog._is_addition(text):
+                        if EditorView._is_addition(text):
                             msg_diff.append(text)
                     else:
                         msg_diff.append(text)
@@ -1543,14 +1547,14 @@ class RenderedLog:
                 elif line_num == (line_to - 1):
                     # Handle trailing synthetic newline
                     if self._styled:
-                        if RenderedLog._is_addition(text):
+                        if EditorView._is_addition(text):
                             msg_diff.append(text)
                     else:
                         msg_diff.append(text)
                 elif line_to <= line_num:
                     break
 
-                RenderedLog._print_diff_info(
+                EditorView._print_diff_info(
                     line_num, msg_uuid, line_from, line_to, text, debug=debug
                 )
 
@@ -1572,10 +1576,10 @@ class RenderedLog:
         # New msg
         new_tags = set(self._tags_flat)
         for line_num, text in diff[diff_index:]:
-            RenderedLog._print_diff_info(line_num, None, None, None, text, debug=debug)
-            if RenderedLog._is_new_tag_line(text):
-                new_tags = RenderedLog._parse_new_tags(text)
-            elif RenderedLog._is_addition(text):
+            EditorView._print_diff_info(line_num, None, None, None, text, debug=debug)
+            if EditorView._is_new_tag_line(text):
+                new_tags = EditorView._parse_new_tags(text)
+            elif EditorView._is_addition(text):
                 msg_diff.append(text)
 
         # Create and append the new msg, if it exists
@@ -1926,15 +1930,15 @@ if __name__ == "__main__":
         # afterward.
         conn.close()
 
-        message_view = RenderedLog(
+        editor_view = EditorView(
             messages, tag_groups, expanded_tag_groups, style=(not args.plain)
         )
 
         new_note = None
         notifications = []
 
-        for body_lines in editor(message_view.rendered):
-            diffs = message_view.diff(body_lines, debug=DEBUG)
+        for body_lines in editor(editor_view.rendered):
+            diffs = editor_view.diff(body_lines, debug=DEBUG)
             if diffs:
                 if diffs[-1].is_new:
                     new_note = diffs[-1]
@@ -1961,8 +1965,8 @@ if __name__ == "__main__":
 
             conn.commit()
 
-            # Reset the RenderedLog to account for the modified notes.
-            message_view = RenderedLog(
+            # Reset the EditorView to account for the modified notes.
+            editor_view = EditorView(
                 select_notes(conn, uuids=[m.uuid for m in messages]),
                 tag_groups,
                 expanded_tag_groups,
