@@ -29,6 +29,7 @@ from typing import (
     Optional,
     Pattern,
     Set,
+    Sequence,
     Tuple,
     Union,
 )
@@ -639,7 +640,7 @@ def open_temp_logfile(lines: Union[List[str], None] = None) -> str:
     return contents
 
 
-def editor(body: List[str]) -> Generator[List[str], None, None]:
+def editor(body: List[str]) -> Generator[Generator[str, None, None], None, None]:
     """
     Launch the users editor and yield the body of the editor as lines of text
     when a change is detected.
@@ -670,9 +671,7 @@ def editor(body: List[str]) -> Generator[List[str], None, None]:
 
                 # Read the new contents
                 with open(tf.name) as f:
-                    edited = f.read()
-
-                yield edited.splitlines(keepends=True)
+                    yield (line for line in f)
 
         os.unlink(tf.name)
 
@@ -837,7 +836,7 @@ INSERT into logs (uuid, created_at, msg) VALUES (?, {timestamp}, ?);
 
 
 def insert_msg(
-    conn: sqlite3.Connection, msg, msg_uuid: uuid.UUID = None, created_at=None
+    conn: sqlite3.Connection, msg: str, msg_uuid: uuid.UUID = None, created_at=None
 ) -> uuid.UUID:
     msg_uuid = uuid.uuid4() if msg_uuid is None else msg_uuid
 
@@ -849,7 +848,6 @@ def insert_msg(
         params = (msg_uuid, created_at, Gzip(msg))
 
     _ = conn.execute(insert, params)
-    conn.commit()
     return msg_uuid
 
 
@@ -1016,33 +1014,27 @@ def select_msgs_from_uuid_prefix(
     return conn.execute(sql, (uuid_prefix,)).fetchall()
 
 
-def delete_msg(conn: sqlite3.Connection, msg_uuid, commit=True) -> bool:
+def delete_msg(conn: sqlite3.Connection, msg_uuid) -> bool:
     """Delete the message with the given UUID.
 
     propagate: If `True` (default), delete the associates to tags,
         but not the tags themselves.
-    commit: If `True`, persist the changes to the DB.
     """
     msg_delete = "DELETE FROM logs WHERE uuid = ?;"
     c = conn.execute(msg_delete, (msg_uuid,))
     if c.rowcount != 1:
         return False
-
-    if commit:
-        conn.commit()
-
     return True
 
 
 # Tags
 
 
-def delete_tag(conn: sqlite3.Connection, tag: str, commit=True) -> bool:
+def delete_tag(conn: sqlite3.Connection, tag: str) -> bool:
     """Delete the tag with the given value.
 
     propagate: If `True` (default), delete the associates to logs,
         but not the logs themselves.
-    commit: If `True`, persist the changes to the DB.
     """
     # Find the id of the tag.
     tag_select = "SELECT uuid FROM tags WHERE tag = ?;"
@@ -1057,10 +1049,6 @@ def delete_tag(conn: sqlite3.Connection, tag: str, commit=True) -> bool:
     c = conn.execute(tag_delete, (tag_uuid,))
     if c.rowcount != 1:
         return False
-
-    if commit:
-        conn.commit()
-
     return True
 
 
@@ -1093,8 +1081,6 @@ def insert_tags(conn: sqlite3.Connection, tags: Iterable[str]) -> Set[uuid.UUID]
         else:
             tag_uuid, _ = result
         tag_uuids.add(tag_uuid)
-
-    conn.commit()
     return tag_uuids
 
 
@@ -1121,7 +1107,6 @@ def insert_asscs(
                 continue
             else:
                 raise e
-    conn.commit()
     return
 
 
@@ -1165,8 +1150,7 @@ def insert_tag_relation(
     else:
         implicit_uuid = tags[implicit]
 
-    with conn:
-        conn.execute(INSERT_TAG_RELATION, (explicit_uuid, implicit_uuid))
+    conn.execute(INSERT_TAG_RELATION, (explicit_uuid, implicit_uuid))
 
     return
 
@@ -1188,8 +1172,7 @@ def remove_tag_relation(conn: sqlite3.Connection, explicit: str, implicit: str) 
     explicit_uuid = tags[explicit]
     implicit_uuid = tags[implicit]
 
-    with conn:
-        result = conn.execute(REMOVE_TAG_RELATION, (explicit_uuid, implicit_uuid))
+    result = conn.execute(REMOVE_TAG_RELATION, (explicit_uuid, implicit_uuid))
 
     return result.rowcount == 1
 
@@ -1229,9 +1212,8 @@ SELECT * from relations;
 def select_related_tags(conn: sqlite3.Connection, tag) -> Set:
     """Select tags associated with the given tag."""
     tags = {tag}
-    with conn:
-        results = conn.execute(SELECT_TAG_RELATIONS, (tag,))
-        tags.update({r["tag"] for r in results})
+    results = conn.execute(SELECT_TAG_RELATIONS, (tag,))
+    tags.update({r["tag"] for r in results})
     return tags
 
 
@@ -1500,20 +1482,22 @@ class EditorView:
         raw_tags = (t.strip() for t in line[len(TAG_LINE) :].split(","))
         return {t for t in raw_tags if t}
 
-    def diff(self, other: Iterable[str], debug=False) -> List["LogDiff"]:
-        """
-        return an iterable of LogDiffs
-        """
-        line_num, diff_index = 0, 0
-        msg_diff = []
-        log_diffs: List[LogDiff] = []
+    @staticmethod
+    def _diff_has_modifications(lines: List[str]) -> bool:
+        return any(line.startswith("- ") or line.startswith("+ ") for line in lines)
 
-        diff = difflib.ndiff(self._lines, list(other))
+    def diff(
+        self, other: Sequence[str], debug=False
+    ) -> Generator[Tuple[Union[None, Note], Note], None, None]:
+        line_num, diff_index = 0, 0
+
+        diff = difflib.ndiff(self._lines, other)
         diff = list(EditorView._enumerate_diff(diff))
 
         line_num, text = diff[diff_index]
 
         for msg_uuid, line_from, line_to in self._line_map:
+            msg_diff = []
             tags_original, tags_updated = None, None
 
             advance = 0
@@ -1556,18 +1540,32 @@ class EditorView:
 
             diff_index += advance
 
-            # TODO: Refactor LogDiff so that lines are iteratively given to it.
-            log_diffs.append(
-                LogDiff(
-                    msg_uuid,
-                    msg_diff,
-                    tags_original=tags_original,
-                    tags_updated=tags_updated,
+            # Continue on if no change detected
+            tags_updated = tags_updated if tags_updated else tags_original
+
+            if (
+                EditorView._diff_has_modifications(msg_diff)
+                or tags_original != tags_updated
+            ):
+                yield (
+                    Note(
+                        msg_uuid,
+                        None,
+                        "".join(difflib.restore(msg_diff, 1)),
+                        tags_original,
+                    ),
+                    Note(
+                        msg_uuid,
+                        None,
+                        "".join(difflib.restore(msg_diff, 2)),
+                        tags_updated,
+                    ),
                 )
-            )
-            msg_diff = []
+            else:
+                continue
 
         # New msg
+        msg_diff = []
         new_tags = set(self._tags_flat)
         for line_num, text in diff[diff_index:]:
             EditorView._print_diff_info(line_num, None, None, None, text, debug=debug)
@@ -1578,117 +1576,10 @@ class EditorView:
 
         # Create and append the new msg, if it exists
         if msg_diff:
-            log_diffs.append(LogDiff(None, msg_diff, tags_original=new_tags))
-
-        return log_diffs
-
-
-class LogDiff:
-    def __init__(
-        self,
-        msg_uuid: uuid.UUID,
-        diff_lines: List[str],
-        tags_original: Union[Set[str], None] = None,
-        tags_updated: Union[Set[str], None] = None,
-    ):
-        """
-        mods: iterable of (change, line_num, text)
-        """
-        self.msg_uuid = msg_uuid
-        self.msg = "".join(difflib.restore(diff_lines, 2))
-        self.diff = diff_lines
-        self._note_modified = any(
-            (line.startswith("- ") or line.startswith("+ ") for line in diff_lines)
-        )
-        self.is_new = msg_uuid is None
-
-        self.tags_original = tags_original
-        self.tags_updated = tags_updated
-        self._tags_modified = tags_updated is not None and (
-            tags_original != tags_updated
-        )
-
-    def __str__(self):
-        return "".join(self.diff)
-
-    def __repr__(self):
-        id_str = str(self.msg_uuid) if not self.is_new else "New"
-        return f"<LogDiff({id_str})>\n{str(self)}</LogDiff>"
-
-    @property
-    def modified(self):
-        return self._note_modified or self._tags_modified
-
-    @property
-    def tags(self):
-        if self.tags_updated is not None:
-            return self.tags_updated
-        return self.tags_original or set()
-
-    def update_or_create(self, conn: sqlite3.Connection, commit: bool = True):
-        if self.is_new:
-            return self._create(conn, commit=commit)
-        else:
-            return self._update(conn, commit=commit)
-
-    def _create(self, conn: sqlite3.Connection, commit: bool = True):
-        msg_uuid = insert_msg(conn, self.msg)
-        self.msg_uuid = msg_uuid
-
-        tag_uuids = insert_tags(conn, self.tags)
-        insert_asscs(conn, self.msg_uuid, tag_uuids)
-
-        if commit:
-            conn.commit()
-
-        return True
-
-    def _update(self, conn: sqlite3.Connection, commit: bool = True):
-        if not self.modified:
-            return True
-
-        if not self.msg:
-            # TODO: delete msg or mark as deleted?
-            pass
-
-        if self._note_modified:
-            if not self._update_msg(conn):
-                # TODO: Maybe throw a custom exception?
-                return False
-
-        if self._tags_modified:
-            if not self._update_tags(conn):
-                return False
-
-        if not self._update_diffs(conn):
-            # TODO: Rollback? Throw exception?
-            return False
-
-        # Allow commit to be defered
-        if commit:
-            conn.commit()
-
-        return True
-
-    def _update_msg(self, conn: sqlite3.Connection):
-        return update_msg(conn, self.msg_uuid, self.msg)
-
-    def _update_tags(self, conn: sqlite3.Connection):
-        tags_add = self.tags_updated - self.tags_original
-        if tags_add:
-            tag_uuids = insert_tags(conn, tags_add)
-            insert_asscs(conn, self.msg_uuid, tag_uuids)
-
-        tags_sub = self.tags_original - self.tags_updated
-        if tags_sub:
-            tag_uuids = {t[0] for t in select_tags(conn, tuple(tags_sub))}
-            remove_asscs(conn, self.msg_uuid, tag_uuids)
-
-        return True
-
-    def _update_diffs(self, conn: sqlite3.Connection):
-        # TODO: Save diff info
-        return True
+            yield (
+                None,
+                Note(None, None, "".join(difflib.restore(msg_diff, 2)), new_tags),
+            )
 
 
 # -----------------------------------------------------------------------------
@@ -1757,7 +1648,7 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
     updated = 0
 
     reader = csv.DictReader(infile)
-    if set(reader.fieldnames) != set(Note._fields):
+    if reader.fieldnames is None or set(reader.fieldnames) != set(Note._fields):
         raise CSVError(
             "Invalid CSV columns; columns must be: uuid,created_at,body,tags"
         )
@@ -1847,7 +1738,8 @@ if __name__ == "__main__":
     if args.note_file_in:
         with open(args.note_file_in, "r") as infile:
             try:
-                inserted, updated = note_import(conn, infile)
+                with conn:
+                    inserted, updated = note_import(conn, infile)
             except CSVError as e:
                 sys.exit(Term.error(str(e)))
         print(
@@ -1856,8 +1748,9 @@ if __name__ == "__main__":
 
     if args.tag_file_in:
         with open(args.tag_file_in, "r") as infile:
-            inserted, existing = tag_import(conn, infile)
-            total = inserted + existing
+            with conn:
+                inserted, existing = tag_import(conn, infile)
+                total = inserted + existing
         print(f" - Inserted {inserted} of {total} relations from {args.tag_file_in}")
 
     if args.note_file_out:
@@ -1876,11 +1769,13 @@ if __name__ == "__main__":
             print(line)
 
     if args.tag_associate or args.tag_disassociate:
-        handle_tag_associate(conn, (args.tag_associate or []))
-        handle_tag_disassociate(conn, (args.tag_disassociate or []))
+        with conn:
+            handle_tag_associate(conn, (args.tag_associate or []))
+            handle_tag_disassociate(conn, (args.tag_disassociate or []))
 
     if args.delete is not None:
-        ui_delete_notes(conn, args.delete, args.confirmation_override)
+        with conn:
+            ui_delete_notes(conn, args.delete, args.confirmation_override)
 
     if any(
         (
@@ -1898,11 +1793,13 @@ if __name__ == "__main__":
     # If reading from stdin
     if args.dash:
         msg = stdin_note()
-        msg_uuid = insert_msg(conn, msg)
-        if args.tags:
-            tags = flatten_tag_groups(args.tags)
-            tag_uuids = insert_tags(conn, tags)
-            insert_asscs(conn, msg_uuid, tag_uuids)
+
+        with conn:
+            msg_uuid = insert_msg(conn, msg)
+            if args.tags:
+                tags = flatten_tag_groups(args.tags)
+                tag_uuids = insert_tags(conn, tags)
+                insert_asscs(conn, msg_uuid, tag_uuids)
 
         print(f"Saved as message ID {msg_uuid}")
         conn.close()
@@ -1932,32 +1829,37 @@ if __name__ == "__main__":
         notifications = []
 
         for body_lines in editor(editor_view.rendered):
-            diffs = editor_view.diff(body_lines, debug=DEBUG)
-            if diffs:
-                if diffs[-1].is_new:
-                    new_note = diffs[-1]
-                elif new_note is not None:
-                    new_note = None
-
-            # Produce the note diffs. We filter out the new note, if it
-            # exists, because we don't want to defer it's creation until
-            # the editor process has exited.
-            changes = [d for d in diffs if d.modified and not d.is_new]
-
-            if not changes:
-                continue
-
             conn = get_connection(str(DB_PATH))
 
-            for change in changes:
-                if DEBUG:
-                    notifications.append(repr(change))
+            diffs = editor_view.diff(list(body_lines), debug=DEBUG)
+            for note_orig, note_mod in diffs:
+                if note_orig is None:
+                    new_note = note_mod
+                    continue
 
-                # TODO: Delete msg if all lines removed?
-                change.update_or_create(conn, commit=False)
-                notifications.append(f"Saved changes to message ID {change.msg_uuid}")
+                assert note_orig.uuid == note_mod.uuid
 
-            conn.commit()
+                # Begin transaction to update note
+                with conn:
+                    if note_orig.body != note_mod.body:
+                        # Update body of note
+                        update_msg(conn, note_mod.uuid, note_mod.body)
+
+                    if note_orig.tags != note_mod.tags:
+                        # Update associated tags
+                        tags_add = note_mod.tags - note_orig.tags
+                        if tags_add:
+                            tag_uuids = insert_tags(conn, tags_add)
+                            insert_asscs(conn, note_mod.uuid, tag_uuids)
+
+                        tags_sub = note_orig.tags - note_mod.tags
+                        if tags_sub:
+                            tag_uuids = {
+                                t[0] for t in select_tags(conn, tuple(tags_sub))
+                            }
+                            remove_asscs(conn, note_mod.uuid, tag_uuids)
+
+                notifications.append(f"Saved changes to message ID {note_mod.uuid}")
 
             # Reset the EditorView to account for the modified notes.
             editor_view = EditorView(
@@ -1971,8 +1873,12 @@ if __name__ == "__main__":
 
         if new_note is not None:
             conn = get_connection(str(DB_PATH))
-            new_note.update_or_create(conn, commit=True)
-            notifications.append(f"Saved additional message as ID {new_note.msg_uuid}")
+            with conn:
+                msg_uuid = insert_msg(conn, new_note.body)
+                tag_uuids = insert_tags(conn, new_note.tags)
+                insert_asscs(conn, msg_uuid, tag_uuids)
+
+                notifications.append(f"Saved additional message as ID {msg_uuid}")
             conn.close()
 
         # Messages / notification to user are deferred until the editor is
@@ -1991,6 +1897,7 @@ if __name__ == "__main__":
         sys.exit()
 
     msg_uuid = insert_msg(conn, msg)
+    conn.commit()
 
     # Collect tags via custom prompt
     tag_prompt = TagPrompt()
@@ -1998,8 +1905,9 @@ if __name__ == "__main__":
     tag_prompt.cmdloop()
 
     if tag_prompt.user_tags:
-        tag_uuids = insert_tags(conn, tag_prompt.user_tags)
-        insert_asscs(conn, msg_uuid, tag_uuids)
+        with conn:
+            tag_uuids = insert_tags(conn, tag_prompt.user_tags)
+            insert_asscs(conn, msg_uuid, tag_uuids)
 
     print(f"Saved as message ID {msg_uuid}")
     conn.close()
