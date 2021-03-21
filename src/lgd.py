@@ -144,7 +144,7 @@ parser.add_argument(
 parser.add_argument(
     "-D",
     "--delete",
-    nargs="+",
+    nargs="*",
     type=str,
     help=(
         "Delete note(s) matching the given UUID or UUID prefix. Confirmation"
@@ -614,10 +614,10 @@ def user_confirmation(prompt: str) -> bool:
     return response == "y" or response == "yes"
 
 
-def prompt_for_delete(msg: sqlite3.Row, uuid_prefix: str) -> bool:
+def prompt_for_delete(uuid_prefix: str, uuid_full: uuid.UUID, note_body) -> bool:
     # TODO: Improve uuid highlighting. Currently doesn't work for whole uuids.
-    uuid_fragment = Term.apply_where(Term.green, uuid_prefix, str(msg[ID])[:8])
-    msg_fragment = msg[MSG][:46].replace("\n", "\\n")[:46].ljust(49, ".")
+    uuid_fragment = Term.apply_where(Term.green, uuid_prefix, str(uuid_full)[:8])
+    msg_fragment = note_body[:46].replace("\n", "\\n")[:46].ljust(49, ".")
 
     prompt = f'{Term.warning("Delete")} {uuid_fragment}..., "{msg_fragment}" [Y/n] '
     return user_confirmation(prompt)
@@ -752,45 +752,62 @@ def rows_to_notes(rows: List[sqlite3.Row]) -> Generator[Note, None, None]:
 def ui_delete_notes(
     conn: sqlite3.Connection,
     uuid_args: List[str],
+    notes_given: List[Note],
     override: bool = False,
     override_strong: bool = False,
 ):
-    def confirm_single(note, prefix):
-        try:
-            return override or override_strong or prompt_for_delete(note, prefix)
-        except (EOFError, KeyboardInterrupt):
-            print("")
-            sys.exit()
-
-    def confirm_multi(note, prefix):
-        try:
-            return override_strong or prompt_for_delete(note, prefix)
-        except (EOFError, KeyboardInterrupt):
-            print("")
-            sys.exit()
-
     uuid_prefixes = [uuid_arg.replace("-", "") for uuid_arg in uuid_args]
-    notes_matched = [
-        (uuid_prefix, select_msgs_from_uuid_prefix(conn, uuid_prefix))
-        for uuid_prefix in uuid_prefixes
-    ]
 
-    for uuid_prefix, notes in notes_matched:
-        if not notes:
-            print(f"{uuid_prefix}, No note found")
+    def confirm_single(uuid_prefix, uuid_full, note_body):
+        try:
+            return (
+                override
+                or override_strong
+                or prompt_for_delete(uuid_prefix, uuid_full, note_body)
+            )
+        except (EOFError, KeyboardInterrupt):
+            print("")
+            sys.exit()
+
+    def confirm_multi(uuid_prefix, uuid_full, note_body):
+        try:
+            return override_strong or prompt_for_delete(
+                uuid_prefix, uuid_full, note_body
+            )
+        except (EOFError, KeyboardInterrupt):
+            print("")
+            sys.exit()
+
+    notes_matched = [(str(n.uuid), ((n.uuid, n.body),)) for n in notes_given]
+    notes_matched.extend(
+        (
+            uuid_prefix,
+            tuple(
+                (n[ID], n[MSG]) for n in select_msgs_from_uuid_prefix(conn, uuid_prefix)
+            ),
+        )
+        for uuid_prefix in uuid_prefixes
+    )
+
+    if not notes_matched:
+        print(" - No notes or UUIDs given")
+
+    for uuid_prefix, matches in notes_matched:
+        if not matches:
+            print(f"'{uuid_prefix}', No note found")
             continue
 
-        if len(notes) == 1:
+        if len(matches) == 1:
             get_confirmation = confirm_single
         else:
             get_confirmation = confirm_multi
 
-        for note in notes:
-            if get_confirmation(note, uuid_prefix):
-                if delete_msg(conn, note[ID]):
-                    print(f" - Deleted {note[ID]}")
+        for uuid_full, note_body in matches:
+            if get_confirmation(uuid_prefix, uuid_full, note_body):
+                if delete_msg(conn, uuid_full):
+                    print(f" - Deleted {uuid_full}")
                 else:
-                    print(f" - Failed to delete {note[ID]}")
+                    print(f" - Failed to delete {uuid_full}")
 
 
 def stdin_note() -> str:
@@ -1735,6 +1752,8 @@ if __name__ == "__main__":
         text=args.search,
     )
 
+    notes_requested = any((tag_groups, args.date_ranges, args.search))
+
     if args.note_file_in:
         with open(args.note_file_in, "r") as infile:
             try:
@@ -1774,8 +1793,11 @@ if __name__ == "__main__":
             handle_tag_disassociate(conn, (args.tag_disassociate or []))
 
     if args.delete is not None:
+        notes_searched = messages if notes_requested else []
         with conn:
-            ui_delete_notes(conn, args.delete, args.confirmation_override)
+            ui_delete_notes(
+                conn, args.delete, notes_searched, args.confirmation_override
+            )
 
     if any(
         (
@@ -1784,7 +1806,7 @@ if __name__ == "__main__":
             args.tag_file_in,
             args.tag_file_out,
             args.tag_stats,
-            args.delete,
+            args.delete is not None,
         )
     ):
         sys.exit()
