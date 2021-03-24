@@ -18,7 +18,7 @@ import time
 import uuid
 
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import (
     Callable,
@@ -69,7 +69,7 @@ def sql_date_format(dt):
     return dt.strftime("%Y-%m-%d")
 
 
-def date_range_from_single(date_str) -> tuple:
+def date_range_from_single(date_str) -> Tuple[datetime, datetime]:
     year, month, day = user_date_components(date_str)
 
     if day is not None and month is not None:
@@ -91,7 +91,6 @@ def date_range_from_single(date_str) -> tuple:
 
 
 def date_range_from_pair(start_str: str, end_str: str) -> Tuple[datetime, datetime]:
-    # TODO: Refactor: Have one function that converts to datetime, call it twice.
     s_y, s_m, s_d = user_date_components(start_str)
     e_y, e_m, e_d = user_date_components(end_str)
 
@@ -99,6 +98,15 @@ def date_range_from_pair(start_str: str, end_str: str) -> Tuple[datetime, dateti
     dt_end = datetime(e_y, e_m or 1, e_d or 1)
 
     return (dt_start, dt_end) if dt_start < dt_end else (dt_end, dt_start)
+
+
+def _date_range_as_utc(
+    datetimes: Tuple[datetime, datetime]
+) -> Tuple[datetime, datetime]:
+    return (
+        datetimes[0].astimezone(timezone.utc),
+        datetimes[1].astimezone(timezone.utc),
+    )
 
 
 def to_datetime_ranges(
@@ -120,7 +128,7 @@ def to_datetime_ranges(
             date_range = date_range_from_pair(*date_arg)
         else:
             raise Exception("`-d/--date` must only be given one or two values")
-        date_ranges.append(date_range)
+        date_ranges.append(_date_range_as_utc(date_range))
 
     return date_ranges
 
