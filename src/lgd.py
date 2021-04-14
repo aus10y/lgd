@@ -289,6 +289,13 @@ parser.add_argument(
         " datetimes, and tags are displayed."
     ),
 )
+parser.add_argument(
+    "--stdout",
+    dest="stdout",
+    action="store_true",
+    default=False,
+    help=("Print notes to STDOUT.")
+)
 
 
 # ----------------------------------------------------------------------------
@@ -951,7 +958,7 @@ def select_notes(
 
     # Where having uuids
     uuid_filter = "1"
-    if uuids:
+    if uuids is not None:
         uuid_filter = _WHERE_UUIDS.format(uuids=", ".join("?" for _ in uuids))
         params.extend(uuids)
 
@@ -1817,6 +1824,7 @@ if __name__ == "__main__":
             args.delete is not None,
         )
     ):
+        conn.close()
         sys.exit()
 
     # ------------------------------------------------------------------------
@@ -1840,6 +1848,7 @@ if __name__ == "__main__":
     if args.metadata:
         for msg in messages:
             print(get_metadata(msg))
+        conn.close()
         sys.exit()
 
     # ------------------------------------------------------------------------
@@ -1854,6 +1863,11 @@ if __name__ == "__main__":
         editor_view = EditorView(
             messages, tag_groups, expanded_tag_groups, style=(not args.plain)
         )
+
+        if args.stdout:
+            # Print to stdout and then exit
+            print("".join(editor_view.rendered))
+            sys.exit()
 
         new_note = None
         notifications = []
