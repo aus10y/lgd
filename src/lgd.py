@@ -294,7 +294,7 @@ parser.add_argument(
     dest="stdout",
     action="store_true",
     default=False,
-    help=("Print notes to STDOUT.")
+    help=("Print notes to STDOUT."),
 )
 
 
@@ -312,8 +312,14 @@ def dir_setup():
 # ----------------------------------------------------------------------------
 # Database Setup
 
-DB_NAME = "logs.db"
-DB_PATH = LGD_PATH / Path(DB_NAME)
+_DB_NAME = "logs.db"
+_DB_PATH = os.getenv("LGD_DB_PATH")
+
+if _DB_PATH is None:
+    DB_PATH = LGD_PATH / Path(_DB_NAME)
+else:
+    DB_PATH = Path(_DB_PATH).expanduser()
+
 DB_USER_VERSION = 1
 
 # Column Names
