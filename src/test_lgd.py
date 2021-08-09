@@ -10,38 +10,42 @@ import string
 import unittest
 import uuid
 
+from typing import List, Set, Tuple
+
 import lgd
 
 
 DB_IN_MEM = ":memory:"
 
 
-def tag_factory(num):
+def tag_factory(num: int) -> List[str]:
     return [
         "".join(random.choices(string.ascii_letters, k=random.randrange(3, 10)))
         for _ in range(num)
     ]
 
 
-def tag_relation_factory(tags, num):
+def tag_relation_factory(tags: str, num: int) -> Set[Tuple]:
     return set(tuple(random.sample(tags, 2)) for _ in range(num))
 
 
-def body_factory():
+def body_factory() -> str:
     return "".join(random.choices(string.printable, k=random.randrange(20, 100)))
 
 
-def date_factory(multiple=1):
+def date_factory(multiple: int = 1) -> datetime.datetime:
     now = datetime.datetime.now().replace(microsecond=0)
     delta = datetime.timedelta(seconds=random.randrange(0, 3600))
     return now - (multiple * delta)
 
 
-def note_factory(num_notes, tags, min_tags=0, max_tags=4):
+def note_factory(
+    num_notes: int, tags: List[str], min_tags: int = 0, max_tags: int = 4
+) -> List[lgd.Note]:
     def choose_tags():
         return frozenset(random.choices(tags, k=random.randrange(min_tags, max_tags)))
 
-    notes = []
+    notes: List[lgd.Note] = []
     for i in range(num_notes):
         note = lgd.Note(
             uuid=uuid.uuid4(),
@@ -53,7 +57,7 @@ def note_factory(num_notes, tags, min_tags=0, max_tags=4):
     return sorted(notes, key=lambda n: n.created_at)
 
 
-def note_csv_factory(notes):
+def note_csv_factory(notes: List[lgd.Note]) -> io.StringIO:
     outfile = io.StringIO()
     writer = csv.DictWriter(outfile, lgd.Note._fields)
     writer.writeheader()
@@ -65,7 +69,7 @@ def note_csv_factory(notes):
     return outfile
 
 
-def tag_csv_factory(tag_relations):
+def tag_csv_factory(tag_relations) -> io.StringIO:
     outfile = io.StringIO()
     writer = csv.writer(outfile)
     writer.writerow(("tag_direct", "tag_indirect"))
@@ -209,12 +213,97 @@ class TestDBSetup(unittest.TestCase):
         self.assertEqual(version, 3)
 
 
-class TestDBNotes(unittest.TestCase):
+class TestNoteInsert(unittest.TestCase):
     def setUp(self):
         self.conn = lgd.get_connection(DB_IN_MEM)
         lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
 
     def test_note_insert(self):
+        note_body = body_factory()
+
+        # Insert a note
+        note_uuid = lgd.insert_note(self.conn, note_body)
+
+        # Show that the note may be retrieved
+        notes = lgd.Notes(uuids=[note_uuid]).fetch(self.conn)
+
+        self.assertEqual(len(notes), 1)
+        note = notes[0]
+
+        self.assertEqual(note.body, note_body)
+
+    def test_note_insert_with_uuid(self):
+        note_uuid_orig = uuid.uuid4()
+        note_body = body_factory()
+
+        # Insert a note, passing a pre-existing uuid.
+        note_uuid = lgd.insert_note(self.conn, note_body, note_uuid=note_uuid_orig)
+        self.assertEqual(note_uuid, note_uuid_orig)
+
+        # Retrieve the note and show that the uuid is the same.
+        notes = lgd.Notes(uuids=[note_uuid]).fetch(self.conn)
+
+        self.assertEqual(len(notes), 1)
+        note = notes[0]
+
+        self.assertEqual(note.body, note_body)
+        self.assertEqual(note.uuid, note_uuid_orig)
+
+    def test_note_insert_with_timestamp(self):
+        created_at_orig = date_factory()
+        note_body = body_factory()
+
+        # Insert a note, passing a pre-existing timestamp.
+        note_uuid = lgd.insert_note(self.conn, note_body, created_at=created_at_orig)
+
+        # Retrieve the note and show that the created_at timestamp is the same.
+        notes = lgd.Notes(uuids=[note_uuid], localtime=False).fetch(self.conn)
+
+        self.assertEqual(len(notes), 1)
+        note = notes[0]
+
+        self.assertEqual(note.body, note_body)
+        self.assertEqual(note.uuid, note_uuid)
+        self.assertEqual(note.created_at, created_at_orig)
+
+
+class TestNoteSelect(unittest.TestCase):
+    def setUp(self):
+        self.conn = lgd.get_connection(DB_IN_MEM)
+        lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        # TODO: insert some notes
+
+    def test_select_uuids(self):
+        note_uuids = [lgd.insert_note(self.conn, body_factory()) for _ in range(5)]
+
+        # Select zero uuids
+        notes = lgd.Notes(uuids=[]).fetch(self.conn)
+        self.assertEqual(notes, [])
+
+        # Select one uuid
+        notes = lgd.Notes(uuids=[note_uuids[0]]).fetch(self.conn)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual([n.uuid for n in notes], [note_uuids[0]])
+
+        # Select multiple uuids
+        notes = lgd.Notes(uuids=note_uuids).fetch(self.conn)
+        self.assertEqual(len(notes), len(note_uuids))
+        self.assertEqual({n.uuid for n in notes}, set(note_uuids))
+
+    def test_select_tag_groups(self):
+        """
+        msg_uuid = lgd.insert_note(self.conn, new_note.body)
+        tag_uuids = lgd.insert_tags(self.conn, new_note.tags)
+        lgd.insert_asscs(self.conn, msg_uuid, tag_uuids)
+        """
+
+    def test_select_date_ranges(self):
+        pass
+
+    def test_select_text(self):
+        pass
+
+    def test_select_complex(self):
         pass
 
 
@@ -288,7 +377,7 @@ class TestCSVNoteExport(unittest.TestCase):
 
     def test_note_export(self):
         # Check number of exported notes
-        notes = lgd.select_notes(self.conn, localtime=False)
+        notes = lgd.Notes(localtime=False).fetch(self.conn)
         outfile = io.StringIO()
         num_exported = lgd.note_export(self.conn, notes, outfile)
 
@@ -296,11 +385,11 @@ class TestCSVNoteExport(unittest.TestCase):
 
     def test_note_export_equality(self):
         # Retrieve Notes inserted during setup.
-        notes1 = set(lgd.select_notes(self.conn))
+        notes1 = set(lgd.Notes().fetch(self.conn))
         self.assertEqual(len(notes1), len(NOTES))
 
         # Export from the setUp DB.
-        notes = lgd.select_notes(self.conn, localtime=False)
+        notes = lgd.Notes(localtime=False).fetch(self.conn)
         notefile = io.StringIO()
         _ = lgd.note_export(self.conn, notes, notefile)
         notefile.seek(0)
@@ -314,7 +403,7 @@ class TestCSVNoteExport(unittest.TestCase):
 
         # Retrieve the Notes from the 2nd DB.
         # Check that the notes retrieved from both DBs are equal.
-        notes2 = set(lgd.select_notes(conn2))
+        notes2 = set(lgd.Notes().fetch(conn2))
         self.assertEqual(notes1, notes2)
 
 

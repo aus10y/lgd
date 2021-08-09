@@ -873,20 +873,26 @@ INSERT into logs (uuid, created_at, msg) VALUES (?, {timestamp}, ?);
 """
 
 
-def insert_msg(
-    conn: sqlite3.Connection, msg: str, msg_uuid: uuid.UUID = None, created_at=None
+def insert_note(
+    conn: sqlite3.Connection,
+    note: str,
+    note_uuid: uuid.UUID = None,
+    created_at: datetime = None,
 ) -> uuid.UUID:
-    msg_uuid = uuid.uuid4() if msg_uuid is None else msg_uuid
+    """
+    created_at is assumed to be in UTC.
+    """
+    note_uuid = uuid.uuid4() if note_uuid is None else note_uuid
 
     if created_at is None:
         insert = INSERT_LOG.format(timestamp="CURRENT_TIMESTAMP")
-        params = (msg_uuid, Gzip(msg))
+        params = (note_uuid, Gzip(note))
     else:
         insert = INSERT_LOG.format(timestamp="?")
-        params = (msg_uuid, created_at, Gzip(msg))
+        params = (note_uuid, created_at, Gzip(note))
 
     _ = conn.execute(insert, params)
-    return msg_uuid
+    return note_uuid
 
 
 SELECT_NOTES_WHERE_TEMPL = """
@@ -952,81 +958,152 @@ _WHERE_FTS = """logs.uuid in (
 _DATE_BETWEEN_FRAGMENT = "({column} BETWEEN '{begin}' AND '{end}')"
 
 
-def select_notes(
-    conn: sqlite3.Connection,
-    uuids: Optional[List[uuid.UUID]] = None,
-    tag_groups: Optional[List[Tuple[str, ...]]] = None,
-    date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
-    text: Optional[str] = None,
-    localtime: bool = True,
-) -> List[Note]:
-    params = []
+class Notes:
+    def __init__(
+        self,
+        uuids: Optional[List[uuid.UUID]] = None,
+        tag_groups: Optional[List[Tuple[str, ...]]] = None,
+        date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
+        text: Optional[str] = None,
+        localtime: Optional[bool] = None,
+    ):
+        self._uuids = uuids
+        self._tag_groups = tag_groups
+        self._date_ranges = date_ranges
+        self._text = text
+        self._localtime = localtime
 
-    # Where having uuids
-    uuid_filter = "1"
-    if uuids is not None:
-        uuid_filter = _WHERE_UUIDS.format(uuids=", ".join("?" for _ in uuids))
-        params.extend(uuids)
-
-    # Where tagged with
-    tags_filter = "1"
-    if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
-        tag_fragments = []
-
-        # All tag groups containing one tag may be grouped together and OR'd.
-        tags_or = [tg[0] for tg in tag_groups if len(tg) == 1 and tg != ("",)]
-        tags_and = [tg for tg in tag_groups if len(tg) > 1]
-        tags_none = any(tg == ("",) for tg in tag_groups)
-
-        for tag_group in tags_and:
-            tag_fragments.append(
-                _WHERE_TAGS_ALL.format(tags=", ".join("?" for _ in tag_group))
-            )
-            params.extend((*tag_group, len(tag_group)))
-
-        if tags_or:
-            tag_fragments.append(
-                _WHERE_TAGS_ANY.format(tags=", ".join("?" for _ in tags_or))
-            )
-            params.extend(tags_or)
-
-        if tags_none:
-            tag_fragments.append(_WHERE_NO_TAGS)
-
-        tags_filter = " OR ".join(tag_fragments)
-
-    # Where contains the text
-    text_filter = "1"
-    if text:
-        text_filter = _WHERE_FTS
-        params.append(text)
-
-    # Where between dates
-    date_filter = "1"
-    if date_ranges:
-        date_filter = " OR ".join(
-            _DATE_BETWEEN_FRAGMENT.format(
-                column="logs.created_at",
-                begin=date_range[0],
-                end=date_range[1],
-            )
-            for date_range in date_ranges
+    def __str__(self) -> str:
+        return str(
+            {
+                "uuids": self._uuids,
+                "tag_groups": self._tag_groups,
+                "date_ranges": self._date_ranges,
+                "text": self._text,
+                "localtime": self._localtime,
+            }
         )
 
-    # Format the datetime
-    datetime_modifier = ""
-    if localtime:
-        datetime_modifier = ", 'localtime'"
+    def __repr__(self) -> str:
+        return f"NoteSelector({str(self)})"
 
-    query = SELECT_NOTES_WHERE_TEMPL.format(
-        uuid_filter=uuid_filter,
-        tags_filter=tags_filter,
-        text_filter=text_filter,
-        date_filter=date_filter,
-        datetime_modifier=datetime_modifier,
-    )
+    def where(
+        self,
+        uuids: Optional[List[uuid.UUID]] = None,
+        tag_groups: Optional[List[Tuple[str, ...]]] = None,
+        date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
+        text: Optional[str] = None,
+        localtime: Optional[bool] = None,
+    ) -> "Notes":
+        return Notes(
+            uuids=uuids if uuids is not None else self._uuids,
+            tag_groups=tag_groups if tag_groups is not None else self._tag_groups,
+            date_ranges=date_ranges if date_ranges is not None else self._date_ranges,
+            text=text if text is not None else self._text,
+            localtime=localtime if localtime is not None else self._localtime,
+        )
 
-    return list(rows_to_notes(conn.execute(query, params).fetchall()))
+    @staticmethod
+    def _uuid_filter(uuids: Union[None, List[uuid.UUID]]) -> Tuple[str, list]:
+        uuid_filter = "1"
+        params = []
+
+        if uuids is not None:
+            uuid_filter = _WHERE_UUIDS.format(uuids=", ".join("?" for _ in uuids))
+            params.extend(uuids)
+
+        return (uuid_filter, params)
+
+    @staticmethod
+    def _tag_groups_filter(
+        tag_groups: Union[None, List[Tuple[str, ...]]]
+    ) -> Tuple[str, list]:
+        tags_filter = "1"
+        params = []
+
+        if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
+            tag_fragments = []
+
+            # All tag groups containing one tag may be grouped together and OR'd.
+            tags_or = [tg[0] for tg in tag_groups if len(tg) == 1 and tg != ("",)]
+            tags_and = [tg for tg in tag_groups if len(tg) > 1]
+            tags_none = any(tg == ("",) for tg in tag_groups)
+
+            for tag_group in tags_and:
+                tag_fragments.append(
+                    _WHERE_TAGS_ALL.format(tags=", ".join("?" for _ in tag_group))
+                )
+                params.extend((*tag_group, len(tag_group)))
+
+            if tags_or:
+                tag_fragments.append(
+                    _WHERE_TAGS_ANY.format(tags=", ".join("?" for _ in tags_or))
+                )
+                params.extend(tags_or)
+
+            if tags_none:
+                tag_fragments.append(_WHERE_NO_TAGS)
+
+            tags_filter = " OR ".join(tag_fragments)
+
+        return (tags_filter, params)
+
+    @staticmethod
+    def _text_filter(text: Union[None, str]) -> Tuple[str, List[str]]:
+        text_filter = "1"
+        params = []
+
+        if text:
+            text_filter = _WHERE_FTS
+            params.append(text)
+
+        return (text_filter, params)
+
+    @staticmethod
+    def _date_filter(
+        date_ranges: Union[None, List[Tuple[datetime, datetime]]]
+    ) -> Tuple[str, list]:
+        date_filter = "1"
+
+        if date_ranges:
+            date_filter = " OR ".join(
+                _DATE_BETWEEN_FRAGMENT.format(
+                    column="logs.created_at",
+                    begin=date_range[0],
+                    end=date_range[1],
+                )
+                for date_range in date_ranges
+            )
+
+        return (date_filter, [])
+
+    @staticmethod
+    def _localtime_correction(localtime: Union[None, bool]) -> str:
+        datetime_modifier = ""
+        if localtime:
+            datetime_modifier = ", 'localtime'"
+        return datetime_modifier
+
+    def fetch(self, conn: sqlite3.Connection) -> List[Note]:
+        uuid_filter, uuid_params = self._uuid_filter(self._uuids)
+        tags_filter, tags_params = self._tag_groups_filter(self._tag_groups)
+        text_filter, text_params = self._text_filter(self._text)
+        date_filter, date_params = self._date_filter(self._date_ranges)
+        datetime_modifier = self._localtime_correction(self._localtime)
+
+        params = list(
+            itertools.chain(uuid_params, tags_params, text_params, date_params)
+        )
+
+        query = SELECT_NOTES_WHERE_TEMPL.format(
+            uuid_filter=uuid_filter,
+            tags_filter=tags_filter,
+            text_filter=text_filter,
+            date_filter=date_filter,
+            datetime_modifier=datetime_modifier,
+        )
+
+        return list(rows_to_notes(conn.execute(query, params).fetchall()))
 
 
 UPDATE_LOG = """
@@ -1053,11 +1130,7 @@ def select_msgs_from_uuid_prefix(
 
 
 def delete_msg(conn: sqlite3.Connection, msg_uuid) -> bool:
-    """Delete the message with the given UUID.
-
-    propagate: If `True` (default), delete the associates to tags,
-        but not the tags themselves.
-    """
+    """Delete the message with the given UUID."""
     msg_delete = "DELETE FROM logs WHERE uuid = ?;"
     c = conn.execute(msg_delete, (msg_uuid,))
     if c.rowcount != 1:
@@ -1247,10 +1320,13 @@ SELECT * from relations;
 """
 
 
-def select_related_tags(conn: sqlite3.Connection, tag) -> Set:
-    """Select tags associated with the given tag."""
-    tags = {tag}
-    results = conn.execute(SELECT_TAG_RELATIONS, (tag,))
+def select_related_tags(conn: sqlite3.Connection, parent_tag: str) -> Set:
+    """Select tags associated with the given tag.
+
+    Returned tags are leaf nodes / child tags.
+    """
+    tags = {parent_tag}
+    results = conn.execute(SELECT_TAG_RELATIONS, (parent_tag,))
     tags.update({r["tag"] for r in results})
     return tags
 
@@ -1720,10 +1796,10 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
             updated += int(update_msg(conn, note.uuid, note.body))
         else:
             # Insert
-            _ = insert_msg(
+            _ = insert_note(
                 conn,
                 note.body,
-                msg_uuid=note.uuid,
+                note_uuid=note.uuid,
                 created_at=note.created_at,
             )
             inserted += 1
@@ -1766,12 +1842,11 @@ if __name__ == "__main__":
     tag_groups = [tg for tg in (args.tags or []) if tg]
     expanded_tag_groups = expand_tag_groups(conn, tag_groups)
 
-    messages = select_notes(
-        conn,
+    messages = Notes(
         tag_groups=expanded_tag_groups,
         date_ranges=args.date_ranges,
         text=args.search,
-    )
+    ).fetch(conn)
 
     notes_requested = any((tag_groups, args.date_ranges, args.search))
 
@@ -1828,6 +1903,7 @@ if __name__ == "__main__":
             args.tag_file_out,
             args.tag_stats,
             args.delete is not None,
+            args.tag_associate or args.tag_disassociate,
         )
     ):
         conn.close()
@@ -1839,7 +1915,7 @@ if __name__ == "__main__":
         msg = stdin_note()
 
         with conn:
-            msg_uuid = insert_msg(conn, msg)
+            msg_uuid = insert_note(conn, msg)
             if args.tags:
                 tags = flatten_tag_groups(args.tags)
                 tag_uuids = insert_tags(conn, tags)
@@ -1913,7 +1989,7 @@ if __name__ == "__main__":
 
             # Reset the EditorView to account for the modified notes.
             editor_view = EditorView(
-                select_notes(conn, uuids=[m.uuid for m in messages]),
+                Notes(uuids=[m.uuid for m in messages]).fetch(conn),
                 tag_groups,
                 expanded_tag_groups,
                 style=(not args.plain),
@@ -1924,7 +2000,7 @@ if __name__ == "__main__":
         if new_note is not None:
             conn = get_connection(str(DB_PATH))
             with conn:
-                msg_uuid = insert_msg(conn, new_note.body)
+                msg_uuid = insert_note(conn, new_note.body)
                 tag_uuids = insert_tags(conn, new_note.tags)
                 insert_asscs(conn, msg_uuid, tag_uuids)
 
@@ -1946,7 +2022,7 @@ if __name__ == "__main__":
         print("No message created...")
         sys.exit()
 
-    msg_uuid = insert_msg(conn, msg)
+    msg_uuid = insert_note(conn, msg)
     conn.commit()
 
     # Collect tags via custom prompt
