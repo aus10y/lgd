@@ -14,7 +14,7 @@ PS1="(lgd) $PS1"
 export PS1
 
 # Alias lgd to ./src/lgd.py
-alias lgd="./src/lgd.py"
+alias lgd="./bin/lgd"
 
 # Point to test database
 export LGD_DB_PATH="~/.lgd/test.db"

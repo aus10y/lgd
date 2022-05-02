@@ -3,9 +3,9 @@ import argparse
 import cmd
 import csv
 import difflib
-import gzip
+
+# import gzip
 import io
-import itertools
 import os
 import re
 import shlex
@@ -14,10 +14,10 @@ from subprocess import TimeoutExpired
 import sys
 import sqlite3
 import tempfile
-import time
+
+# import time
 import uuid
 
-from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import (
@@ -33,6 +33,9 @@ from typing import (
     Tuple,
     Union,
 )
+
+import data
+from exceptions import LgdException, CSVError
 
 
 EDITOR = os.environ.get("EDITOR", "vim")
@@ -320,198 +323,6 @@ if _DB_PATH is None:
 else:
     DB_PATH = Path(_DB_PATH).expanduser()
 
-DB_USER_VERSION = 1
-
-# Column Names
-ID = "uuid"
-LOG = "log"
-MSG = "msg"
-TAG = "tag"
-TAGS = "tags"
-CREATED_AT = "created_at"
-
-CREATE_LOGS_TABLE = """
-CREATE TABLE IF NOT EXISTS logs (
-    uuid UUID PRIMARY KEY,
-    created_at timestamp NOT NULL,
-    msg GZIP NOT NULL
-);
-"""
-
-CREATE_CREATED_AT_INDEX = """
-CREATE INDEX IF NOT EXISTS created_at_idx ON logs (created_at);
-"""
-
-CREATE_TAGS_TABLE = """
-CREATE TABLE IF NOT EXISTS tags (
-    uuid UUID PRIMARY KEY,
-    tag TEXT NOT NULL UNIQUE
-);
-"""
-
-CREATE_TAG_INDEX = """
-CREATE INDEX IF NOT EXISTS tag_idx ON tags (tag);
-"""
-
-CREATE_ASSOC_TABLE = """
-CREATE TABLE IF NOT EXISTS logs_tags (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    log_uuid UUID NOT NULL,
-    tag_uuid UUID NOT NULL,
-    FOREIGN KEY (log_uuid) REFERENCES logs(uuid) ON DELETE CASCADE,
-    FOREIGN KEY (tag_uuid) REFERENCES tags(uuid) ON DELETE CASCADE,
-    UNIQUE(log_uuid, tag_uuid)
-);
-"""
-
-CREATE_ASSC_LOGS_INDEX = """
-CREATE INDEX IF NOT EXISTS assc_log_idx ON logs_tags (log_uuid);
-"""
-
-CREATE_ASSC_TAGS_INDEX = """
-CREATE INDEX IF NOT EXISTS assc_tag_idx ON logs_tags (tag_uuid);
-"""
-
-CREATE_TAG_RELATIONS_TABLE = """
-CREATE TABLE IF NOT EXISTS tag_relations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tag_uuid UUID NOT NULL,
-    tag_uuid_denoted UUID NOT NULL,
-    FOREIGN KEY (tag_uuid) REFERENCES tags(uuid) ON DELETE CASCADE,
-    FOREIGN KEY (tag_uuid_denoted) REFERENCES tags(uuid) ON DELETE CASCADE,
-    UNIQUE(tag_uuid, tag_uuid_denoted)
-);
-"""
-
-CREATE_TAG_DIRECT_INDEX = """
-CREATE INDEX IF NOT EXISTS tag_direct_idx ON tag_relations (tag_uuid);
-"""
-
-CREATE_TAG_INDIRECT_INDEX = """
-CREATE INDEX IF NOT EXISTS tag_indirect_idx ON tag_relations (tag_uuid_denoted);
-"""
-
-# Create the full text search table using the External-Content-Table syntax.
-CREATE_FTS_TABLE = """
-CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
-    note, content=''
-);
-"""
-
-FTS_TRIGGERS = """
-CREATE TRIGGER logs_ai AFTER INSERT ON logs BEGIN
-    INSERT INTO logs_fts(rowid, note) VALUES (NEW.rowid, unzip(NEW.msg));
-END;
-CREATE TRIGGER logs_ad AFTER DELETE ON logs BEGIN
-    INSERT INTO logs_fts(logs_fts, rowid, note) VALUES('delete', OLD.rowid, unzip(OLD.msg));
-END;
-CREATE TRIGGER logs_au AFTER UPDATE ON logs BEGIN
-    INSERT INTO logs_fts(logs_fts, rowid, note) VALUES('delete', OLD.rowid, unzip(OLD.msg));
-    INSERT INTO logs_fts(rowid, note) VALUES (NEW.rowid, unzip(NEW.msg));
-END;
-"""
-
-
-def get_connection(db_path: str, debug=False) -> sqlite3.Connection:
-    # This creates the sqlite db if it doesn't exist.
-    conn = sqlite3.connect(
-        db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
-    )
-
-    # Register adapters and converters.
-    sqlite3.register_adapter(uuid.UUID, lambda u: u.bytes)
-    sqlite3.register_converter("UUID", lambda b: uuid.UUID(bytes=b))
-    sqlite3.register_adapter(Gzip, lambda s: Gzip.compress_string(s))
-    sqlite3.register_converter(Gzip.COL_TYPE, lambda b: Gzip.decompress_string(b))
-
-    # Register functions
-    conn.create_function("unzip", 1, Gzip.decompress_string)
-
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-
-    if debug:
-        sqlite3.enable_callback_tracebacks(True)
-        conn.set_trace_callback(print)
-
-    return conn
-
-
-def get_user_version(conn: sqlite3.Connection) -> int:
-    c = conn.execute("PRAGMA user_version;")
-    return c.fetchone()[0]
-
-
-def set_user_version(conn: sqlite3.Connection, version: int, commit=True) -> int:
-    version = int(version)
-    conn.execute(f"PRAGMA user_version = {version};")
-    conn.commit() if commit else None
-    return version
-
-
-def db_init(conn):
-    # Ensure logs table
-    conn.execute(CREATE_LOGS_TABLE)
-    conn.execute(CREATE_CREATED_AT_INDEX)
-
-    # Ensure tags table
-    conn.execute(CREATE_TAGS_TABLE)
-    conn.execute(CREATE_TAG_INDEX)
-
-    # Ensure association table
-    conn.execute(CREATE_ASSOC_TABLE)
-    conn.execute(CREATE_ASSC_LOGS_INDEX)
-    conn.execute(CREATE_ASSC_TAGS_INDEX)
-
-    # Ensure tag relations table
-    conn.execute(CREATE_TAG_RELATIONS_TABLE)
-    conn.execute(CREATE_TAG_DIRECT_INDEX)
-    conn.execute(CREATE_TAG_INDIRECT_INDEX)
-
-    # Ensure full text search table & triggers
-    conn.execute(CREATE_FTS_TABLE)
-    conn.executescript(FTS_TRIGGERS)
-
-
-DB_MIGRATIONS = [
-    (1, db_init),
-]
-
-
-def db_setup(
-    conn: sqlite3.Connection,
-    migrations: List[Tuple[int, Callable[[sqlite3.Connection], None]]],
-) -> bool:
-    """Set up the database and perform necessary migrations."""
-    version = get_user_version(conn)
-    if version == DB_USER_VERSION:
-        return True  # the DB is up to date.
-
-    # TODO: Backup the database before migrating?
-
-    for migration_version, migration in migrations:
-        if version < migration_version:
-            try:
-                with conn:
-                    conn.execute("BEGIN")
-                    migration(conn)
-            except sqlite3.Error as e:
-                print(Term.error(str(e)))
-                return False
-            version = set_user_version(conn, version + 1)
-
-    return True
-
-
-# -----------------------------------------------------------------------------
-# Types
-
-Note = namedtuple("Note", ("uuid", "created_at", "body", "tags"))
-
-Tag = namedtuple("Tag", ("uuid", "value"))
-
-TagRelation = namedtuple("TagRelation", ("direct", "indirect"))
-
 # -----------------------------------------------------------------------------
 # Misc. Utilities
 
@@ -521,9 +332,9 @@ class TagPrompt(cmd.Cmd):
     intro = "Enter comma separated tags:"
     prompt = "(tags) "
 
-    def __init__(self, *arg, **kwargs):
+    def __init__(self, tags: List[str], *arg, **kwargs):
         super().__init__(*arg, **kwargs)
-        self._personal_tags = None
+        self._personal_tags = tags
         self._final_tags = None
 
     @staticmethod
@@ -553,10 +364,6 @@ class TagPrompt(cmd.Cmd):
             return [t for t in self._personal_tags if t.startswith(tag)]
         else:
             return self._personal_tags
-
-    def populate_tags(self, conn):
-        c = conn.execute("SELECT tags.tag FROM tags;")
-        self._personal_tags = [r[0] for r in c.fetchall()]
 
     @property
     def user_tags(self):
@@ -606,21 +413,6 @@ class Term:
         color_func: Callable[[str], str], sub_string: str, text: str
     ) -> str:
         return text.replace(sub_string, color_func(sub_string))
-
-
-class Gzip(str):
-    """This class exisits to aid sqlite adapters and converters for compressing
-    text via gzip."""
-
-    COL_TYPE = "GZIP"
-
-    @staticmethod
-    def compress_string(msg_str: str, **kwargs) -> bytes:
-        return gzip.compress(msg_str.encode("utf8"), **kwargs)
-
-    @staticmethod
-    def decompress_string(msg_bytes: bytes) -> str:
-        return gzip.decompress(msg_bytes).decode("utf8")
 
 
 def flatten_tag_groups(tag_groups: Iterable[Tuple[str, ...]]) -> List[str]:
@@ -760,20 +552,10 @@ def format_tag_statistics(cur: sqlite3.Cursor) -> List[str]:
     return stats_table
 
 
-def split_tags(tags: Union[str, None]) -> FrozenSet[str]:
-    return frozenset(t.strip() for t in tags.split(",")) if tags else frozenset()
-
-
-def rows_to_notes(rows: List[sqlite3.Row]) -> Generator[Note, None, None]:
-    return (
-        Note(r["uuid"], r["created_at"], r["body"], split_tags(r["tags"])) for r in rows
-    )
-
-
 def ui_delete_notes(
     conn: sqlite3.Connection,
     uuid_args: List[str],
-    notes_given: List[Note],
+    notes_given: List[data.Note],
     override: bool = False,
     override_strong: bool = False,
 ):
@@ -804,7 +586,8 @@ def ui_delete_notes(
         (
             uuid_prefix,
             tuple(
-                (n[ID], n[MSG]) for n in select_msgs_from_uuid_prefix(conn, uuid_prefix)
+                (n[data.ID], n[data.MSG])
+                for n in data.select_msgs_from_uuid_prefix(conn, uuid_prefix)
             ),
         )
         for uuid_prefix in uuid_prefixes
@@ -825,7 +608,7 @@ def ui_delete_notes(
 
         for uuid_full, note_body in matches:
             if get_confirmation(uuid_prefix, uuid_full, note_body):
-                if delete_msg(conn, uuid_full):
+                if data.delete_msg(conn, uuid_full):
                     print(f" - Deleted {uuid_full}")
                 else:
                     print(f" - Failed to delete {uuid_full}")
@@ -846,577 +629,9 @@ def stdin_note() -> str:
     return "".join(lines)
 
 
-def get_metadata(note: Note) -> str:
+def get_metadata(note: data.Note) -> str:
     tags = ",".join(sorted(note.tags))
     return f'{note.uuid},{note.created_at},"{tags}"'
-
-
-# -----------------------------------------------------------------------------
-# Exceptions
-
-
-class LgdException(Exception):
-    pass
-
-
-class CSVError(LgdException):
-    pass
-
-
-# -----------------------------------------------------------------------------
-# SQL queries and related functions
-
-# Log / Message related
-
-INSERT_LOG = """
-INSERT into logs (uuid, created_at, msg) VALUES (?, {timestamp}, ?);
-"""
-
-
-def insert_note(
-    conn: sqlite3.Connection,
-    note: str,
-    note_uuid: uuid.UUID = None,
-    created_at: datetime = None,
-) -> uuid.UUID:
-    """
-    created_at is assumed to be in UTC.
-    """
-    note_uuid = uuid.uuid4() if note_uuid is None else note_uuid
-
-    if created_at is None:
-        insert = INSERT_LOG.format(timestamp="CURRENT_TIMESTAMP")
-        params = (note_uuid, Gzip(note))
-    else:
-        insert = INSERT_LOG.format(timestamp="?")
-        params = (note_uuid, created_at, Gzip(note))
-
-    _ = conn.execute(insert, params)
-    return note_uuid
-
-
-SELECT_NOTES_WHERE_TEMPL = """
-SELECT
-    logs.uuid AS uuid,
-    datetime(logs.created_at{datetime_modifier}) AS "created_at [timestamp]",
-    logs.msg AS body,
-    group_concat(tags.tag) AS tags
-FROM logs
-LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
-LEFT JOIN tags ON tags.uuid = lt.tag_uuid
-WHERE
-    ({uuid_filter})
-AND ({tags_filter})
-AND ({text_filter})
-AND ({date_filter})
-GROUP BY logs.uuid, logs.created_at, logs.msg
-ORDER BY logs.created_at;
-"""
-
-_WHERE_UUIDS = """logs.uuid IN ({uuids})"""
-
-_WHERE_TAGS_ALL = """(logs.uuid in (
-    SELECT log_uuid
-    FROM logs_tags
-    WHERE tag_uuid in (
-        SELECT uuid
-        FROM tags
-        WHERE tag in ({tags})
-    )
-    GROUP BY log_uuid
-    HAVING COUNT(tag_uuid) >= ?))
-"""
-
-_WHERE_TAGS_ANY = """(logs.uuid in (
-    SELECT log_uuid
-    FROM logs_tags
-    WHERE tag_uuid in (
-        SELECT uuid
-        FROM tags
-        WHERE tag in ({tags})
-    )
-    GROUP BY log_uuid))
-"""
-
-_WHERE_NO_TAGS = """(logs.uuid in (
-    SELECT logs.uuid
-    FROM logs
-    LEFT JOIN logs_tags lt ON lt.log_uuid = logs.uuid
-    WHERE lt.log_uuid is NULL))
-"""
-
-_WHERE_FTS = """logs.uuid in (
-    SELECT logs.uuid
-    FROM logs
-    INNER JOIN (
-        SELECT rowid
-        FROM logs_fts
-        WHERE logs_fts MATCH ?
-        ORDER BY rank) fts on fts.rowid = logs.rowid)
-"""
-
-_DATE_BETWEEN_FRAGMENT = "({column} BETWEEN '{begin}' AND '{end}')"
-
-
-class Notes:
-    def __init__(
-        self,
-        uuids: Optional[List[uuid.UUID]] = None,
-        tag_groups: Optional[List[Tuple[str, ...]]] = None,
-        date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
-        text: Optional[str] = None,
-        localtime: Optional[bool] = None,
-    ):
-        self._uuids = uuids
-        self._tag_groups = tag_groups
-        self._date_ranges = date_ranges
-        self._text = text
-        self._localtime = localtime
-
-    def __str__(self) -> str:
-        return str(
-            {
-                "uuids": self._uuids,
-                "tag_groups": self._tag_groups,
-                "date_ranges": self._date_ranges,
-                "text": self._text,
-                "localtime": self._localtime,
-            }
-        )
-
-    def __repr__(self) -> str:
-        return f"NoteSelector({str(self)})"
-
-    def where(
-        self,
-        uuids: Optional[List[uuid.UUID]] = None,
-        tag_groups: Optional[List[Tuple[str, ...]]] = None,
-        date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
-        text: Optional[str] = None,
-        localtime: Optional[bool] = None,
-    ) -> "Notes":
-        return Notes(
-            uuids=uuids if uuids is not None else self._uuids,
-            tag_groups=tag_groups if tag_groups is not None else self._tag_groups,
-            date_ranges=date_ranges if date_ranges is not None else self._date_ranges,
-            text=text if text is not None else self._text,
-            localtime=localtime if localtime is not None else self._localtime,
-        )
-
-    @staticmethod
-    def _uuid_filter(uuids: Union[None, List[uuid.UUID]]) -> Tuple[str, list]:
-        uuid_filter = "1"
-        params = []
-
-        if uuids is not None:
-            uuid_filter = _WHERE_UUIDS.format(uuids=", ".join("?" for _ in uuids))
-            params.extend(uuids)
-
-        return (uuid_filter, params)
-
-    @staticmethod
-    def _tag_groups_filter(
-        tag_groups: Union[None, List[Tuple[str, ...]]]
-    ) -> Tuple[str, list]:
-        tags_filter = "1"
-        params = []
-
-        if tag_groups and not (len(tag_groups) == 1 and not tag_groups[0]):
-            tag_fragments = []
-
-            # All tag groups containing one tag may be grouped together and OR'd.
-            tags_or = [tg[0] for tg in tag_groups if len(tg) == 1 and tg != ("",)]
-            tags_and = [tg for tg in tag_groups if len(tg) > 1]
-            tags_none = any(tg == ("",) for tg in tag_groups)
-
-            for tag_group in tags_and:
-                tag_fragments.append(
-                    _WHERE_TAGS_ALL.format(tags=", ".join("?" for _ in tag_group))
-                )
-                params.extend((*tag_group, len(tag_group)))
-
-            if tags_or:
-                tag_fragments.append(
-                    _WHERE_TAGS_ANY.format(tags=", ".join("?" for _ in tags_or))
-                )
-                params.extend(tags_or)
-
-            if tags_none:
-                tag_fragments.append(_WHERE_NO_TAGS)
-
-            tags_filter = " OR ".join(tag_fragments)
-
-        return (tags_filter, params)
-
-    @staticmethod
-    def _text_filter(text: Union[None, str]) -> Tuple[str, List[str]]:
-        text_filter = "1"
-        params = []
-
-        if text:
-            text_filter = _WHERE_FTS
-            params.append(text)
-
-        return (text_filter, params)
-
-    @staticmethod
-    def _date_filter(
-        date_ranges: Union[None, List[Tuple[datetime, datetime]]]
-    ) -> Tuple[str, list]:
-        date_filter = "1"
-
-        if date_ranges:
-            date_filter = " OR ".join(
-                _DATE_BETWEEN_FRAGMENT.format(
-                    column="logs.created_at",
-                    begin=date_range[0],
-                    end=date_range[1],
-                )
-                for date_range in date_ranges
-            )
-
-        return (date_filter, [])
-
-    @staticmethod
-    def _localtime_correction(localtime: Union[None, bool]) -> str:
-        datetime_modifier = ""
-        if localtime:
-            datetime_modifier = ", 'localtime'"
-        return datetime_modifier
-
-    def fetch(self, conn: sqlite3.Connection) -> List[Note]:
-        uuid_filter, uuid_params = self._uuid_filter(self._uuids)
-        tags_filter, tags_params = self._tag_groups_filter(self._tag_groups)
-        text_filter, text_params = self._text_filter(self._text)
-        date_filter, date_params = self._date_filter(self._date_ranges)
-        datetime_modifier = self._localtime_correction(self._localtime)
-
-        params = list(
-            itertools.chain(uuid_params, tags_params, text_params, date_params)
-        )
-
-        query = SELECT_NOTES_WHERE_TEMPL.format(
-            uuid_filter=uuid_filter,
-            tags_filter=tags_filter,
-            text_filter=text_filter,
-            date_filter=date_filter,
-            datetime_modifier=datetime_modifier,
-        )
-
-        return list(rows_to_notes(conn.execute(query, params).fetchall()))
-
-
-UPDATE_LOG = """
-UPDATE logs SET msg = ? WHERE uuid = ?
-"""
-
-
-def update_msg(conn: sqlite3.Connection, msg_uuid: uuid.UUID, msg: str) -> bool:
-    c = conn.execute(UPDATE_LOG, (Gzip(msg), msg_uuid))
-    return c.rowcount == 1
-
-
-def msg_exists(conn: sqlite3.Connection, msg_uuid) -> bool:
-    sql = "SELECT uuid from logs where uuid = ?;"
-    return conn.execute(sql, (msg_uuid,)).fetchone() is not None
-
-
-def select_msgs_from_uuid_prefix(
-    conn: sqlite3.Connection, uuid_prefix: str
-) -> List[sqlite3.Row]:
-    uuid_prefix += "%"
-    sql = "SELECT * from logs where hex(uuid) like ?;"
-    return conn.execute(sql, (uuid_prefix,)).fetchall()
-
-
-def delete_msg(conn: sqlite3.Connection, msg_uuid) -> bool:
-    """Delete the message with the given UUID."""
-    msg_delete = "DELETE FROM logs WHERE uuid = ?;"
-    c = conn.execute(msg_delete, (msg_uuid,))
-    if c.rowcount != 1:
-        return False
-    return True
-
-
-# Tags
-
-
-def delete_tag(conn: sqlite3.Connection, tag: str) -> bool:
-    """Delete the tag with the given value.
-
-    propagate: If `True` (default), delete the associates to logs,
-        but not the logs themselves.
-    """
-    # Find the id of the tag.
-    tag_select = "SELECT uuid FROM tags WHERE tag = ?;"
-    c = conn.execute(tag_select, (tag,))
-    result = c.fetchone()
-    if not result:
-        return False
-    tag_uuid = result[0]
-
-    # Delete the tag.
-    tag_delete = "DELETE FROM tags WHERE uuid = ?;"
-    c = conn.execute(tag_delete, (tag_uuid,))
-    if c.rowcount != 1:
-        return False
-    return True
-
-
-def select_tag(conn: sqlite3.Connection, tag: str) -> Union[sqlite3.Row, None]:
-    result = select_tags(conn, [tag])
-    return result[0] if result else None
-
-
-def select_tags(
-    conn: sqlite3.Connection, tags: Union[List[str], Tuple[str, ...]]
-) -> List[sqlite3.Row]:
-    tag_snippet = ", ".join("?" for _ in tags)
-    sql = f"SELECT * FROM tags WHERE tag in ({tag_snippet})"
-    c = conn.execute(sql, tags)
-    return c.fetchall()
-
-
-INSERT_TAG = """
-INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
-"""
-
-
-def insert_tags(conn: sqlite3.Connection, tags: Iterable[str]) -> Set[uuid.UUID]:
-    tag_uuids = set()
-    for tag in tags:
-        result = select_tag(conn, tag)
-        if result is None:
-            tag_uuid = uuid.uuid4()
-            _ = conn.execute(INSERT_TAG, (tag_uuid, tag))
-        else:
-            tag_uuid, _ = result
-        tag_uuids.add(tag_uuid)
-    return tag_uuids
-
-
-def select_all_tags(conn: sqlite3.Connection) -> List[str]:
-    c = conn.execute("SELECT tags.tag FROM tags;")
-    return [r[0] for r in c.fetchall()]
-
-
-# Log-Tag associations
-
-INSERT_LOG_TAG_ASSC = """
-INSERT INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);
-"""
-
-
-def insert_asscs(
-    conn: sqlite3.Connection, msg_uuid: uuid.UUID, tag_uuids: Iterable[uuid.UUID]
-) -> None:
-    for tag_uuid in tag_uuids:
-        try:
-            conn.execute(INSERT_LOG_TAG_ASSC, (msg_uuid, tag_uuid))
-        except sqlite3.IntegrityError as e:
-            if "unique" in str(e).lower():
-                continue
-            else:
-                raise e
-    return
-
-
-def remove_asscs(
-    conn: sqlite3.Connection, msg_uuid: uuid.UUID, tag_uuids: Iterable[uuid.UUID]
-) -> None:
-    if not tag_uuids:
-        return
-
-    sql = "DELETE FROM logs_tags WHERE log_uuid = ? AND tag_uuid in ({tags})".format(
-        tags=",".join("?" for _ in tag_uuids)
-    )
-    conn.execute(sql, (msg_uuid, *tag_uuids))
-    return
-
-
-# Tag Relations
-
-INSERT_TAG_RELATION = """
-INSERT INTO tag_relations (tag_uuid, tag_uuid_denoted) VALUES (?, ?);
-"""
-
-
-def insert_tag_relation(
-    conn: sqlite3.Connection, explicit: str, implicit: str, quiet=False
-):
-    tags = select_tags(conn, (explicit, implicit))
-    tags = {t[TAG]: t[ID] for t in tags}
-
-    if explicit not in tags:
-        explicit_uuid = insert_tags(conn, (explicit,)).pop()
-        if not quiet:
-            print(f"- Inserted '{explicit}' tag'")
-    else:
-        explicit_uuid = tags[explicit]
-
-    if implicit not in tags:
-        implicit_uuid = insert_tags(conn, (implicit,)).pop()
-        if not quiet:
-            print(f"- Inserted '{implicit}' tag'")
-    else:
-        implicit_uuid = tags[implicit]
-
-    conn.execute(INSERT_TAG_RELATION, (explicit_uuid, implicit_uuid))
-
-    return
-
-
-REMOVE_TAG_RELATION = """
-DELETE from tag_relations WHERE tag_uuid = ? AND tag_uuid_denoted = ?;
-"""
-
-
-def remove_tag_relation(conn: sqlite3.Connection, explicit: str, implicit: str) -> bool:
-    tags = select_tags(conn, (explicit, implicit))
-    tags = {t[TAG]: t[ID] for t in tags}
-
-    if explicit not in tags:
-        raise LgdException(f"Relation not removed: Tag '{explicit}' not found!")
-    if implicit not in tags:
-        raise LgdException(f"Relation not removed: Tag '{implicit}' not found!")
-
-    explicit_uuid = tags[explicit]
-    implicit_uuid = tags[implicit]
-
-    result = conn.execute(REMOVE_TAG_RELATION, (explicit_uuid, implicit_uuid))
-
-    return result.rowcount == 1
-
-
-SELECT_TAG_RELATIONS_ALL = """
-SELECT t1.tag AS tag_direct, t2.tag AS tag_indirect
-FROM tag_relations tr
-INNER JOIN tags t1 ON t1.uuid = tr.tag_uuid
-INNER JOIN tags t2 ON t2.uuid = tr.tag_uuid_denoted;
-"""
-
-
-def select_related_tags_all(conn: sqlite3.Connection) -> List[sqlite3.Row]:
-    cursor = conn.execute(SELECT_TAG_RELATIONS_ALL)
-    return cursor.fetchall()
-
-
-SELECT_TAG_RELATIONS = """
-WITH RECURSIVE relations (tag, tag_uuid, tag_denoted, tag_uuid_denoted) AS (
-  SELECT tags.tag, tr.tag_uuid, tags_from.tag, tr.tag_uuid_denoted
-  FROM tag_relations tr
-    INNER JOIN tags as tags_from on tags_from.uuid = tr.tag_uuid_denoted
-    INNER JOIN tags on tags.uuid = tr.tag_uuid
-  WHERE tags_from.tag = ?
-
-  UNION
-
-  SELECT tags.tag, tr.tag_uuid, relations.tag, tr.tag_uuid_denoted
-  FROM tag_relations tr
-    INNER JOIN relations on relations.tag_uuid = tr.tag_uuid_denoted
-    INNER JOIN tags on tags.uuid = tr.tag_uuid
-)
-SELECT * from relations;
-"""
-
-
-def select_related_tags(conn: sqlite3.Connection, parent_tag: str) -> Set:
-    """Select tags associated with the given tag.
-
-    Returned tags are leaf nodes / child tags.
-    """
-    tags = {parent_tag}
-    results = conn.execute(SELECT_TAG_RELATIONS, (parent_tag,))
-    tags.update({r["tag"] for r in results})
-    return tags
-
-
-def expand_tag_groups(
-    conn: sqlite3.Connection, tag_groups: List[List[str]]
-) -> List[Tuple[str, ...]]:
-    """
-    Given a set of "tag groups" (a list of lists of tags), expand those tags to
-    include related tags, while maintaing the appropriate AND and OR
-    relationships between the groups.
-
-    We operate with the assumption that the sub-lists shall be OR'd together
-    while the tags within each sub-list shall be AND'd.
-    """
-    expanded_groups = []
-    for tag_group in tag_groups:
-        related_groups = []
-        for tag in tag_group:
-            # Expand the tag into it's related tags
-            related_groups.append(select_related_tags(conn, tag))
-
-        # Find the product of the groups of related tags.
-        expanded_groups.extend(list(itertools.product(*related_groups)))
-
-    # Due to tag-associations, it's possible for an expanded sub-tuple to
-    # consist of a repeated tag. We'll take a step here to reduce these groups
-    # as there is no benefit to this repetition.
-    groups: List[Tuple[str, ...]] = [
-        group if len(set(group)) > 1 else (group[0],) for group in expanded_groups
-    ]
-
-    return groups
-
-
-SELECT_TAG_STATISTICS = """
-WITH RECURSIVE relations (tag_FROM, tag, tag_uuid, tag_uuid_denoted) AS (
-    SELECT tags_FROM.tag, tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
-        FROM tag_relations tr
-    INNER JOIN tags AS tags_FROM ON tags_FROM.uuid = tr.tag_uuid_denoted
-    INNER JOIN tags ON tags.uuid = tr.tag_uuid
-
-    UNION
-
-    SELECT relations.tag_FROM, tags.tag, tr.tag_uuid, tr.tag_uuid_denoted
-        FROM tag_relations tr
-    INNER JOIN relations ON relations.tag_uuid = tr.tag_uuid_denoted
-    INNER JOIN tags ON tags.uuid = tr.tag_uuid
-)
-
-SELECT
-    t1.tag,
-    COALESCE((
-        SELECT
-            COUNT(*)
-        FROM tags
-            INNER JOIN logs_tags lt ON lt.tag_uuid = tags.uuid
-            INNER JOIN logs ON logs.uuid = lt.log_uuid
-        WHERE tags.tag = t1.tag
-        GROUP BY tags.tag
-    ), 0) AS direct,
-    COALESCE((
-        SELECT
-            count(*) AS cnt
-        FROM logs
-        INNER JOIN logs_tags lt ON logs.uuid = lt.log_uuid
-        INNER JOIN tags ON lt.tag_uuid = tags.uuid
-        WHERE tags.tag in (
-            SELECT tag
-            FROM relations
-            WHERE tag_FROM = t1.tag
-        )
-    ), 0) AS implied,
-    COALESCE(REPLACE(GROUP_CONCAT(DISTINCT r.tag), ',', ', '), '') AS children,
-    COALESCE(REPLACE(GROUP_CONCAT(DISTINCT r2.tag_FROM), ',', ', '), '') AS implies
-FROM
-    tags t1
-LEFT JOIN
-    relations r ON r.tag_FROM = t1.tag
-LEFT JOIN
-    relations r2 ON r2.tag = t1.tag
-GROUP BY t1.tag
-ORDER BY implied DESC, direct DESC, t1.tag ASC;
-"""
-
-
-def tag_statistics(conn: sqlite3.Connection) -> sqlite3.Cursor:
-    with conn:
-        results = conn.execute(SELECT_TAG_STATISTICS)
-    return results
 
 
 # -----------------------------------------------------------------------------
@@ -1429,7 +644,7 @@ class EditorView:
 
     def __init__(
         self,
-        notes: Iterable[Note],
+        notes: Iterable[data.Note],
         tag_groups: List[Tuple[str, ...]],
         expanded_tag_groups: List[Tuple[str, ...]],
         style: bool = True,
@@ -1484,7 +699,7 @@ class EditorView:
         return header
 
     @staticmethod
-    def _note_header(note: Note) -> Tuple[str, ...]:
+    def _note_header(note: data.Note) -> Tuple[str, ...]:
         tags_str = "" if not note.tags else ", ".join(sorted(note.tags))
         id_str = str(note.uuid)[:8]  # Only show first eight digits of UUID
         header = (
@@ -1496,7 +711,7 @@ class EditorView:
         return header
 
     @staticmethod
-    def _note_footer(note: Note) -> Tuple[str, ...]:
+    def _note_footer(note: data.Note) -> Tuple[str, ...]:
         # Add a newline, but only if there's not already an empty line at the
         # end of the note body.
         if note.body[-2:] == "\n\n":
@@ -1602,7 +817,7 @@ class EditorView:
 
     def diff(
         self, other: Sequence[str], debug=False
-    ) -> Generator[Tuple[Union[None, Note], Note], None, None]:
+    ) -> Generator[Tuple[Union[None, data.Note], data.Note], None, None]:
         line_num, diff_index = 0, 0
 
         diff = difflib.ndiff(self._lines, other)
@@ -1662,13 +877,13 @@ class EditorView:
                 or tags_original != tags_updated
             ):
                 yield (
-                    Note(
+                    data.Note(
                         msg_uuid,
                         None,
                         "".join(difflib.restore(msg_diff, 1)),
                         tags_original,
                     ),
-                    Note(
+                    data.Note(
                         msg_uuid,
                         None,
                         "".join(difflib.restore(msg_diff, 2)),
@@ -1692,7 +907,7 @@ class EditorView:
         if msg_diff:
             yield (
                 None,
-                Note(None, None, "".join(difflib.restore(msg_diff, 2)), new_tags),
+                data.Note(None, None, "".join(difflib.restore(msg_diff, 2)), new_tags),
             )
 
 
@@ -1707,7 +922,7 @@ def handle_tag_associate(
     inserted, existing = 0, 0
     for explicit, implicit in to_associate:
         try:
-            insert_tag_relation(conn, explicit, implicit, quiet=True)
+            data.insert_tag_relation(conn, explicit, implicit, quiet=True)
         except LgdException as e:
             print(Term.warning(str(e)))
         except sqlite3.IntegrityError as e:
@@ -1730,7 +945,7 @@ def handle_tag_disassociate(
 ) -> None:
     for explicit, implicit in to_disassociate:
         try:
-            removed = remove_tag_relation(conn, explicit, implicit)
+            removed = data.remove_tag_relation(conn, explicit, implicit)
         except LgdException as e:
             print(Term.warning(str(e)))
         else:
@@ -1745,9 +960,9 @@ def handle_tag_disassociate(
 
 
 def note_export(
-    conn: sqlite3.Connection, notes: List[Note], outfile: io.TextIOWrapper
+    conn: sqlite3.Connection, notes: List[data.Note], outfile: io.TextIOWrapper
 ) -> int:
-    writer = csv.DictWriter(outfile, Note._fields)
+    writer = csv.DictWriter(outfile, data.Note._fields)
     writer.writeheader()
     for note in notes:
         # For the CSV file, for the tags to be a comma separated str.
@@ -1762,28 +977,30 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
     updated = 0
 
     reader = csv.DictReader(infile)
-    if reader.fieldnames is None or set(reader.fieldnames) != set(Note._fields):
+    if reader.fieldnames is None or set(reader.fieldnames) != set(data.Note._fields):
         raise CSVError(
             "Invalid CSV columns; columns must be: uuid,created_at,body,tags"
         )
 
     for row in reader:
         try:
-            row[CREATED_AT] = datetime.strptime(row[CREATED_AT], "%Y-%m-%d %H:%M:%S")
+            row[data.CREATED_AT] = datetime.strptime(
+                row[data.CREATED_AT], "%Y-%m-%d %H:%M:%S"
+            )
         except ValueError as e:
             raise CSVError(
                 "Invalid 'created_at' format; timestamp must be 'YYYY-MM-DD HH:MM:SS'."
             ) from e
 
         try:
-            row[ID] = uuid.UUID(row[ID])
+            row[data.ID] = uuid.UUID(row[data.ID])
         except ValueError as e:
             raise CSVError(
                 "Invalid 'uuid' format; value must be string of hex digits. Curly braces, hyphens, and a URN prefix are all optional."
             ) from e
 
         try:
-            note = Note(**row)
+            note = data.Note(**row)
         except TypeError as e:
             raise CSVError(
                 "Invalid CSV columns; columns must be: uuid,created_at,body,tags"
@@ -1791,12 +1008,12 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
 
         tags = note.tags.split(",")
 
-        if msg_exists(conn, note.uuid):
+        if data.msg_exists(conn, note.uuid):
             # Update
-            updated += int(update_msg(conn, note.uuid, note.body))
+            updated += int(data.update_msg(conn, note.uuid, note.body))
         else:
             # Insert
-            _ = insert_note(
+            _ = data.insert_note(
                 conn,
                 note.body,
                 note_uuid=note.uuid,
@@ -1804,14 +1021,14 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
             )
             inserted += 1
 
-        tag_uuids = insert_tags(conn, tags)
-        insert_asscs(conn, note.uuid, tag_uuids)
+        tag_uuids = data.insert_tags(conn, tags)
+        data.insert_asscs(conn, note.uuid, tag_uuids)
 
     return (inserted, updated)
 
 
 def tag_export(conn: sqlite3.Connection, outfile: io.TextIOWrapper) -> int:
-    tag_relations = select_related_tags_all(conn)
+    tag_relations = data.select_related_tags_all(conn)
     writer = csv.writer(outfile)
     writer.writerow(("tag_direct", "tag_indirect"))
     writer.writerows(tag_relations)
@@ -1826,23 +1043,27 @@ def tag_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int,
 
 # -----------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def main():
     args = parser.parse_args()
     args.date_ranges = to_datetime_ranges(args.date_ranges)
 
     dir_setup()
-    conn = get_connection(str(DB_PATH))
+    conn = data.get_connection(str(DB_PATH))
 
-    if not db_setup(conn, DB_MIGRATIONS):
+    try:
+        data.db_setup(conn, data.DB_MIGRATIONS)
+    except sqlite3.Error as e:
+        print(Term.error(str(e)))
         print("Failed to finish database setup!")
-        sys.exit()
+        sys.exit(1)
 
     # ------------------------------------------------------------------------
     # Apply the users filters to select the notes/messages
     tag_groups = [tg for tg in (args.tags or []) if tg]
-    expanded_tag_groups = expand_tag_groups(conn, tag_groups)
+    expanded_tag_groups = data.expand_tag_groups(conn, tag_groups)
 
-    messages = Notes(
+    messages = data.Notes(
         tag_groups=expanded_tag_groups,
         date_ranges=args.date_ranges,
         text=args.search,
@@ -1879,7 +1100,7 @@ if __name__ == "__main__":
         print(f" - Exported {num} tag relations to {args.tag_file_out}")
 
     if args.tag_stats:
-        stats = format_tag_statistics(tag_statistics(conn))
+        stats = format_tag_statistics(data.tag_statistics(conn))
         for line in stats:
             print(line)
 
@@ -1915,11 +1136,11 @@ if __name__ == "__main__":
         msg = stdin_note()
 
         with conn:
-            msg_uuid = insert_note(conn, msg)
+            msg_uuid = data.insert_note(conn, msg)
             if args.tags:
                 tags = flatten_tag_groups(args.tags)
-                tag_uuids = insert_tags(conn, tags)
-                insert_asscs(conn, msg_uuid, tag_uuids)
+                tag_uuids = data.insert_tags(conn, tags)
+                data.insert_asscs(conn, msg_uuid, tag_uuids)
 
         print(f"Saved as message ID {msg_uuid}")
         conn.close()
@@ -1955,7 +1176,7 @@ if __name__ == "__main__":
         notifications = []
 
         for body_lines in editor(editor_view.rendered):
-            conn = get_connection(str(DB_PATH))
+            conn = data.get_connection(str(DB_PATH))
 
             diffs = editor_view.diff(list(body_lines), debug=DEBUG)
             for note_orig, note_mod in diffs:
@@ -1969,27 +1190,27 @@ if __name__ == "__main__":
                 with conn:
                     if note_orig.body != note_mod.body:
                         # Update body of note
-                        update_msg(conn, note_mod.uuid, note_mod.body)
+                        data.update_msg(conn, note_mod.uuid, note_mod.body)
 
                     if note_orig.tags != note_mod.tags:
                         # Update associated tags
                         tags_add = note_mod.tags - note_orig.tags
                         if tags_add:
-                            tag_uuids = insert_tags(conn, tags_add)
-                            insert_asscs(conn, note_mod.uuid, tag_uuids)
+                            tag_uuids = data.insert_tags(conn, tags_add)
+                            data.insert_asscs(conn, note_mod.uuid, tag_uuids)
 
                         tags_sub = note_orig.tags - note_mod.tags
                         if tags_sub:
                             tag_uuids = {
-                                t[0] for t in select_tags(conn, tuple(tags_sub))
+                                t[0] for t in data.select_tags(conn, tuple(tags_sub))
                             }
-                            remove_asscs(conn, note_mod.uuid, tag_uuids)
+                            data.remove_asscs(conn, note_mod.uuid, tag_uuids)
 
                 notifications.append(f"Saved changes to message ID {note_mod.uuid}")
 
             # Reset the EditorView to account for the modified notes.
             editor_view = EditorView(
-                Notes(uuids=[m.uuid for m in messages]).fetch(conn),
+                data.Notes(uuids=[m.uuid for m in messages]).fetch(conn),
                 tag_groups,
                 expanded_tag_groups,
                 style=(not args.plain),
@@ -1998,11 +1219,11 @@ if __name__ == "__main__":
             conn.close()
 
         if new_note is not None:
-            conn = get_connection(str(DB_PATH))
+            conn = data.get_connection(str(DB_PATH))
             with conn:
-                msg_uuid = insert_note(conn, new_note.body)
-                tag_uuids = insert_tags(conn, new_note.tags)
-                insert_asscs(conn, msg_uuid, tag_uuids)
+                msg_uuid = data.insert_note(conn, new_note.body)
+                tag_uuids = data.insert_tags(conn, new_note.tags)
+                data.insert_asscs(conn, msg_uuid, tag_uuids)
 
                 notifications.append(f"Saved additional message as ID {msg_uuid}")
             conn.close()
@@ -2022,18 +1243,17 @@ if __name__ == "__main__":
         print("No message created...")
         sys.exit()
 
-    msg_uuid = insert_note(conn, msg)
+    msg_uuid = data.insert_note(conn, msg)
     conn.commit()
 
     # Collect tags via custom prompt
-    tag_prompt = TagPrompt()
-    tag_prompt.populate_tags(conn)
+    tag_prompt = TagPrompt(data.select_all_tags(conn))
     tag_prompt.cmdloop()
 
     if tag_prompt.user_tags:
         with conn:
-            tag_uuids = insert_tags(conn, tag_prompt.user_tags)
-            insert_asscs(conn, msg_uuid, tag_uuids)
+            tag_uuids = data.insert_tags(conn, tag_prompt.user_tags)
+            data.insert_asscs(conn, msg_uuid, tag_uuids)
 
     print(f"Saved as message ID {msg_uuid}")
     conn.close()

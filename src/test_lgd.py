@@ -13,6 +13,8 @@ import uuid
 from typing import List, Set, Tuple
 
 import lgd
+from lgd import data
+from lgd import exceptions
 
 
 DB_IN_MEM = ":memory:"
@@ -41,13 +43,13 @@ def date_factory(multiple: int = 1) -> datetime.datetime:
 
 def note_factory(
     num_notes: int, tags: List[str], min_tags: int = 0, max_tags: int = 4
-) -> List[lgd.Note]:
+) -> List[data.Note]:
     def choose_tags():
         return frozenset(random.choices(tags, k=random.randrange(min_tags, max_tags)))
 
-    notes: List[lgd.Note] = []
+    notes: List[data.Note] = []
     for i in range(num_notes):
-        note = lgd.Note(
+        note = data.Note(
             uuid=uuid.uuid4(),
             created_at=date_factory(multiple=i),
             body=body_factory(),
@@ -57,9 +59,9 @@ def note_factory(
     return sorted(notes, key=lambda n: n.created_at)
 
 
-def note_csv_factory(notes: List[lgd.Note]) -> io.StringIO:
+def note_csv_factory(notes: List[data.Note]) -> io.StringIO:
     outfile = io.StringIO()
-    writer = csv.DictWriter(outfile, lgd.Note._fields)
+    writer = csv.DictWriter(outfile, data.Note._fields)
     writer.writeheader()
     for note in notes:
         # For the CSV file, for the tags to be a comma separated str.
@@ -118,37 +120,37 @@ class TestGzip(unittest.TestCase):
         self.data = gzip.compress(self.text.encode("utf8"))
 
     def test_compress_string(self):
-        compressed = lgd.Gzip.compress_string(self.text)
+        compressed = data.Gzip.compress_string(self.text)
 
         self.assertIsInstance(compressed, bytes)
         self.assertEqual(self.text, gzip.decompress(compressed).decode("utf8"))
 
     def test_decompress_string(self):
-        decompressed = lgd.Gzip.decompress_string(self.data)
+        decompressed = data.Gzip.decompress_string(self.data)
 
         self.assertIsInstance(decompressed, str)
         self.assertEqual(self.text, decompressed)
 
     def test_col_type(self):
-        self.assertTrue(hasattr(lgd.Gzip, "COL_TYPE"))
-        self.assertEqual(lgd.Gzip.COL_TYPE, "GZIP")
+        self.assertTrue(hasattr(data.Gzip, "COL_TYPE"))
+        self.assertEqual(data.Gzip.COL_TYPE, "GZIP")
 
 
 class TestDBSetup(unittest.TestCase):
     def setUp(self):
-        self.conn = lgd.get_connection(DB_IN_MEM)
+        self.conn = data.get_connection(DB_IN_MEM)
 
     def test_migrations(self):
         # App version before migrations
-        current_version = lgd.get_user_version(self.conn)
-        self.assertNotEqual(current_version, lgd.DB_USER_VERSION)
+        current_version = data.get_user_version(self.conn)
+        self.assertNotEqual(current_version, data.DB_USER_VERSION)
 
-        success = lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        success = data.db_setup(self.conn, data.DB_MIGRATIONS)
         self.assertTrue(success, "DB migrations failed!")
 
         # After migrations
-        current_version = lgd.get_user_version(self.conn)
-        self.assertEqual(current_version, lgd.DB_USER_VERSION)
+        current_version = data.get_user_version(self.conn)
+        self.assertEqual(current_version, data.DB_USER_VERSION)
 
     def test_migration_fail(self):
         # Test that a sqlite3 exception will be caught.
@@ -158,11 +160,14 @@ class TestDBSetup(unittest.TestCase):
 
         migrations = [(1, lambda c: raise_err(sqlite3.Error))]
 
-        success = lgd.db_setup(self.conn, migrations)
+        success = data.db_setup(self.conn, migrations)
         self.assertFalse(success, "db_setup failed to catch migration failure")
 
     def test_migration_intermediate(self):
         BAD_TABLE = "fail"
+
+        def good_migration(conn):
+            conn.execute("CREATE table success (id INT PRIMARY KEY);")
 
         def bad_migration(conn):
             conn.execute(f"CREATE TABLE {BAD_TABLE} (id INT PRIMARY KEY, data BLOB);")
@@ -171,9 +176,6 @@ class TestDBSetup(unittest.TestCase):
             self.assertEqual(cursor.fetchone()[1], "abcd")
             raise sqlite3.Error
 
-        def good_migration(conn):
-            conn.execute("CREATE table success (id INT PRIMARY KEY);")
-
         migrations = [
             (1, good_migration),
             (2, bad_migration),
@@ -181,12 +183,12 @@ class TestDBSetup(unittest.TestCase):
 
         # Expect failure to finish all migrations
 
-        success = lgd.db_setup(self.conn, migrations)
+        success = data.db_setup(self.conn, migrations)
         self.assertFalse(success)
 
         # Ensure good_migration succeeded.
 
-        db_version = lgd.get_user_version(self.conn)
+        db_version = data.get_user_version(self.conn)
         self.assertEqual(db_version, 1)
 
         # Ensure bad_migration failed and did not fail in an intermediate state
@@ -201,31 +203,31 @@ class TestDBSetup(unittest.TestCase):
         self.assertFalse(table_exists, f"count == {count}; table exists!")
 
     def test_db_version(self):
-        version = lgd.get_user_version(self.conn)
+        version = data.get_user_version(self.conn)
         self.assertEqual(version, 0)
 
-        lgd.set_user_version(self.conn, 1)
-        version = lgd.get_user_version(self.conn)
+        data.set_user_version(self.conn, 1)
+        version = data.get_user_version(self.conn)
         self.assertEqual(version, 1)
 
-        lgd.set_user_version(self.conn, 3)
-        version = lgd.get_user_version(self.conn)
+        data.set_user_version(self.conn, 3)
+        version = data.get_user_version(self.conn)
         self.assertEqual(version, 3)
 
 
 class TestNoteInsert(unittest.TestCase):
     def setUp(self):
-        self.conn = lgd.get_connection(DB_IN_MEM)
-        lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        self.conn = data.get_connection(DB_IN_MEM)
+        data.db_setup(self.conn, data.DB_MIGRATIONS)
 
     def test_note_insert(self):
         note_body = body_factory()
 
         # Insert a note
-        note_uuid = lgd.insert_note(self.conn, note_body)
+        note_uuid = data.insert_note(self.conn, note_body)
 
         # Show that the note may be retrieved
-        notes = lgd.Notes(uuids=[note_uuid]).fetch(self.conn)
+        notes = data.Notes(uuids=[note_uuid]).fetch(self.conn)
 
         self.assertEqual(len(notes), 1)
         note = notes[0]
@@ -237,11 +239,11 @@ class TestNoteInsert(unittest.TestCase):
         note_body = body_factory()
 
         # Insert a note, passing a pre-existing uuid.
-        note_uuid = lgd.insert_note(self.conn, note_body, note_uuid=note_uuid_orig)
+        note_uuid = data.insert_note(self.conn, note_body, note_uuid=note_uuid_orig)
         self.assertEqual(note_uuid, note_uuid_orig)
 
         # Retrieve the note and show that the uuid is the same.
-        notes = lgd.Notes(uuids=[note_uuid]).fetch(self.conn)
+        notes = data.Notes(uuids=[note_uuid]).fetch(self.conn)
 
         self.assertEqual(len(notes), 1)
         note = notes[0]
@@ -254,10 +256,10 @@ class TestNoteInsert(unittest.TestCase):
         note_body = body_factory()
 
         # Insert a note, passing a pre-existing timestamp.
-        note_uuid = lgd.insert_note(self.conn, note_body, created_at=created_at_orig)
+        note_uuid = data.insert_note(self.conn, note_body, created_at=created_at_orig)
 
         # Retrieve the note and show that the created_at timestamp is the same.
-        notes = lgd.Notes(uuids=[note_uuid], localtime=False).fetch(self.conn)
+        notes = data.Notes(uuids=[note_uuid], localtime=False).fetch(self.conn)
 
         self.assertEqual(len(notes), 1)
         note = notes[0]
@@ -269,24 +271,24 @@ class TestNoteInsert(unittest.TestCase):
 
 class TestNoteSelect(unittest.TestCase):
     def setUp(self):
-        self.conn = lgd.get_connection(DB_IN_MEM)
-        lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        self.conn = data.get_connection(DB_IN_MEM)
+        data.db_setup(self.conn, data.DB_MIGRATIONS)
         # TODO: insert some notes
 
     def test_select_uuids(self):
-        note_uuids = [lgd.insert_note(self.conn, body_factory()) for _ in range(5)]
+        note_uuids = [data.insert_note(self.conn, body_factory()) for _ in range(5)]
 
         # Select zero uuids
-        notes = lgd.Notes(uuids=[]).fetch(self.conn)
+        notes = data.Notes(uuids=[]).fetch(self.conn)
         self.assertEqual(notes, [])
 
         # Select one uuid
-        notes = lgd.Notes(uuids=[note_uuids[0]]).fetch(self.conn)
+        notes = data.Notes(uuids=[note_uuids[0]]).fetch(self.conn)
         self.assertEqual(len(notes), 1)
         self.assertEqual([n.uuid for n in notes], [note_uuids[0]])
 
         # Select multiple uuids
-        notes = lgd.Notes(uuids=note_uuids).fetch(self.conn)
+        notes = data.Notes(uuids=note_uuids).fetch(self.conn)
         self.assertEqual(len(notes), len(note_uuids))
         self.assertEqual({n.uuid for n in notes}, set(note_uuids))
 
@@ -309,8 +311,8 @@ class TestNoteSelect(unittest.TestCase):
 
 class TestCSVNoteInsert(unittest.TestCase):
     def setUp(self):
-        self.conn = lgd.get_connection(DB_IN_MEM)
-        lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        self.conn = data.get_connection(DB_IN_MEM)
+        data.db_setup(self.conn, data.DB_MIGRATIONS)
 
     def test_note_import_new(self):
         inserted, updated = lgd.note_import(self.conn, get_note_csv())
@@ -319,7 +321,7 @@ class TestCSVNoteInsert(unittest.TestCase):
 
     def test_invalid_fieldnames(self):
         infile = io.StringIO("a,b,c,d\n" "1,2,3,4\n")
-        with self.assertRaises(lgd.CSVError):
+        with self.assertRaises(exceptions.CSVError):
             _, _ = lgd.note_import(self.conn, infile)
 
     def test_invalid_uuid(self):
@@ -331,7 +333,7 @@ class TestCSVNoteInsert(unittest.TestCase):
             with self.subTest(uuid_bad=uuid_bad):
                 notes[0] = notes[0]._replace(uuid=uuid_bad)
                 infile = note_csv_factory(notes)
-                with self.assertRaises(lgd.CSVError):
+                with self.assertRaises(exceptions.CSVError):
                     _, _ = lgd.note_import(self.conn, infile)
 
     def test_invalid_created_at(self):
@@ -351,14 +353,14 @@ class TestCSVNoteInsert(unittest.TestCase):
             with self.subTest(date_bad=date_bad):
                 notes[0] = notes[0]._replace(created_at=date_bad)
                 infile = note_csv_factory(notes)
-                with self.assertRaises(lgd.CSVError):
+                with self.assertRaises(exceptions.CSVError):
                     _, _ = lgd.note_import(self.conn, infile)
 
 
 class TestCSVNoteUpdate(unittest.TestCase):
     def setUp(self):
-        self.conn = lgd.get_connection(DB_IN_MEM)
-        lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        self.conn = data.get_connection(DB_IN_MEM)
+        data.db_setup(self.conn, data.DB_MIGRATIONS)
         self.inserted, self.updated = lgd.note_import(self.conn, get_note_csv())
 
     def test_note_import_update(self):
@@ -371,13 +373,13 @@ class TestCSVNoteUpdate(unittest.TestCase):
 
 class TestCSVNoteExport(unittest.TestCase):
     def setUp(self):
-        self.conn = lgd.get_connection(DB_IN_MEM)
-        lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        self.conn = data.get_connection(DB_IN_MEM)
+        data.db_setup(self.conn, data.DB_MIGRATIONS)
         self.inserted, self.updated = lgd.note_import(self.conn, get_note_csv())
 
     def test_note_export(self):
         # Check number of exported notes
-        notes = lgd.Notes(localtime=False).fetch(self.conn)
+        notes = data.Notes(localtime=False).fetch(self.conn)
         outfile = io.StringIO()
         num_exported = lgd.note_export(self.conn, notes, outfile)
 
@@ -385,32 +387,32 @@ class TestCSVNoteExport(unittest.TestCase):
 
     def test_note_export_equality(self):
         # Retrieve Notes inserted during setup.
-        notes1 = set(lgd.Notes().fetch(self.conn))
+        notes1 = set(data.Notes().fetch(self.conn))
         self.assertEqual(len(notes1), len(NOTES))
 
         # Export from the setUp DB.
-        notes = lgd.Notes(localtime=False).fetch(self.conn)
+        notes = data.Notes(localtime=False).fetch(self.conn)
         notefile = io.StringIO()
         _ = lgd.note_export(self.conn, notes, notefile)
         notefile.seek(0)
 
         # Set up a second DB
-        conn2 = lgd.get_connection(DB_IN_MEM)
-        lgd.db_setup(conn2, lgd.DB_MIGRATIONS)
+        conn2 = data.get_connection(DB_IN_MEM)
+        data.db_setup(conn2, data.DB_MIGRATIONS)
 
         # Import the Notes from the 1st DB into the 2nd.
         _, _ = lgd.note_import(conn2, notefile)
 
         # Retrieve the Notes from the 2nd DB.
         # Check that the notes retrieved from both DBs are equal.
-        notes2 = set(lgd.Notes().fetch(conn2))
+        notes2 = set(data.Notes().fetch(conn2))
         self.assertEqual(notes1, notes2)
 
 
 class TestCSVTagImportExport(unittest.TestCase):
     def setUp(self):
-        self.conn = lgd.get_connection(DB_IN_MEM)
-        lgd.db_setup(self.conn, lgd.DB_MIGRATIONS)
+        self.conn = data.get_connection(DB_IN_MEM)
+        data.db_setup(self.conn, data.DB_MIGRATIONS)
 
     def test_tag_relation_import_new(self):
         inserted, existing = lgd.tag_import(self.conn, get_tag_csv())
@@ -430,7 +432,7 @@ class TestCSVTagImportExport(unittest.TestCase):
     def test_tag_relation_export(self):
         # Insert and then retrieve tag-relations.
         _, _ = lgd.tag_import(self.conn, get_tag_csv())
-        tag_relations1 = set(lgd.select_related_tags_all(self.conn))
+        tag_relations1 = set(data.select_related_tags_all(self.conn))
         self.assertEqual(len(tag_relations1), len(TAG_RELATIONS))
 
         # Export tag-relations from the initial DB.
@@ -440,13 +442,13 @@ class TestCSVTagImportExport(unittest.TestCase):
 
         # Set up a second DB.
         # Import tag-relations from the 1st DB into the 2nd.
-        conn2 = lgd.get_connection(DB_IN_MEM)
-        lgd.db_setup(conn2, lgd.DB_MIGRATIONS)
+        conn2 = data.get_connection(DB_IN_MEM)
+        data.db_setup(conn2, data.DB_MIGRATIONS)
         _, _ = lgd.tag_import(conn2, tagfile)
 
         # Retrieve the tag-relations from the 2nd DB.
         # Check that the tag-relations retrieved from both DBs are equal.
-        tag_relations2 = set(lgd.select_related_tags_all(conn2))
+        tag_relations2 = set(data.select_related_tags_all(conn2))
         self.assertEqual(tag_relations1, tag_relations2)
 
 
