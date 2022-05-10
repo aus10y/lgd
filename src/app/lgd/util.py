@@ -3,40 +3,32 @@ import argparse
 import cmd
 import csv
 import difflib
-
-# import gzip
 import io
 import os
 import re
 import shlex
-import subprocess
-from subprocess import TimeoutExpired
-import sys
 import sqlite3
+import subprocess
+import sys
 import tempfile
-
-# import time
 import uuid
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from subprocess import TimeoutExpired
 from typing import (
     Callable,
-    FrozenSet,
     Generator,
     Iterable,
     List,
-    Optional,
     Pattern,
-    Set,
     Sequence,
+    Set,
     Tuple,
     Union,
 )
 
-import data
-from exceptions import LgdException, CSVError
-
+from lgd import data, exceptions
 
 EDITOR = os.environ.get("EDITOR", "vim")
 DEBUG = False
@@ -923,7 +915,7 @@ def handle_tag_associate(
     for explicit, implicit in to_associate:
         try:
             data.insert_tag_relation(conn, explicit, implicit, quiet=True)
-        except LgdException as e:
+        except exceptions.LgdException as e:
             print(Term.warning(str(e)))
         except sqlite3.IntegrityError as e:
             existing += 1
@@ -946,7 +938,7 @@ def handle_tag_disassociate(
     for explicit, implicit in to_disassociate:
         try:
             removed = data.remove_tag_relation(conn, explicit, implicit)
-        except LgdException as e:
+        except exceptions.LgdException as e:
             print(Term.warning(str(e)))
         else:
             if removed:
@@ -978,7 +970,7 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
 
     reader = csv.DictReader(infile)
     if reader.fieldnames is None or set(reader.fieldnames) != set(data.Note._fields):
-        raise CSVError(
+        raise exceptions.CSVError(
             "Invalid CSV columns; columns must be: uuid,created_at,body,tags"
         )
 
@@ -988,21 +980,21 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
                 row[data.CREATED_AT], "%Y-%m-%d %H:%M:%S"
             )
         except ValueError as e:
-            raise CSVError(
+            raise exceptions.CSVError(
                 "Invalid 'created_at' format; timestamp must be 'YYYY-MM-DD HH:MM:SS'."
             ) from e
 
         try:
             row[data.ID] = uuid.UUID(row[data.ID])
         except ValueError as e:
-            raise CSVError(
+            raise exceptions.CSVError(
                 "Invalid 'uuid' format; value must be string of hex digits. Curly braces, hyphens, and a URN prefix are all optional."
             ) from e
 
         try:
             note = data.Note(**row)
         except TypeError as e:
-            raise CSVError(
+            raise exceptions.CSVError(
                 "Invalid CSV columns; columns must be: uuid,created_at,body,tags"
             ) from e
 
@@ -1039,221 +1031,3 @@ def tag_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int,
     reader = csv.DictReader(infile)
     relations = ((row["tag_direct"], row["tag_indirect"]) for row in reader)
     return handle_tag_associate(conn, relations, quiet=True)
-
-
-# -----------------------------------------------------------------------------
-
-
-def main():
-    args = parser.parse_args()
-    args.date_ranges = to_datetime_ranges(args.date_ranges)
-
-    dir_setup()
-    conn = data.get_connection(str(DB_PATH))
-
-    try:
-        data.db_setup(conn, data.DB_MIGRATIONS)
-    except sqlite3.Error as e:
-        print(Term.error(str(e)))
-        print("Failed to finish database setup!")
-        sys.exit(1)
-
-    # ------------------------------------------------------------------------
-    # Apply the users filters to select the notes/messages
-    tag_groups = [tg for tg in (args.tags or []) if tg]
-    expanded_tag_groups = data.expand_tag_groups(conn, tag_groups)
-
-    messages = data.Notes(
-        tag_groups=expanded_tag_groups,
-        date_ranges=args.date_ranges,
-        text=args.search,
-    ).fetch(conn)
-
-    notes_requested = any((tag_groups, args.date_ranges, args.search))
-
-    if args.note_file_in:
-        with open(args.note_file_in, "r") as infile:
-            try:
-                with conn:
-                    inserted, updated = note_import(conn, infile)
-            except CSVError as e:
-                sys.exit(Term.error(str(e)))
-        print(
-            f" - Inserted {inserted}, updated {updated} notes from {args.note_file_in}"
-        )
-
-    if args.tag_file_in:
-        with open(args.tag_file_in, "r") as infile:
-            with conn:
-                inserted, existing = tag_import(conn, infile)
-                total = inserted + existing
-        print(f" - Inserted {inserted} of {total} relations from {args.tag_file_in}")
-
-    if args.note_file_out:
-        with open(args.note_file_out, "w") as outfile:
-            num = note_export(conn, messages, outfile)
-        print(f" - Exported {num} notes to {args.note_file_out}")
-
-    if args.tag_file_out:
-        with open(args.tag_file_out, "w") as outfile:
-            num = tag_export(conn, outfile)
-        print(f" - Exported {num} tag relations to {args.tag_file_out}")
-
-    if args.tag_stats:
-        stats = format_tag_statistics(data.tag_statistics(conn))
-        for line in stats:
-            print(line)
-
-    if args.tag_associate or args.tag_disassociate:
-        with conn:
-            handle_tag_associate(conn, (args.tag_associate or []))
-            handle_tag_disassociate(conn, (args.tag_disassociate or []))
-
-    if args.delete is not None:
-        notes_searched = messages if notes_requested else []
-        with conn:
-            ui_delete_notes(
-                conn, args.delete, notes_searched, args.confirmation_override
-            )
-
-    if any(
-        (
-            args.note_file_in,
-            args.note_file_out,
-            args.tag_file_in,
-            args.tag_file_out,
-            args.tag_stats,
-            args.delete is not None,
-            args.tag_associate or args.tag_disassociate,
-        )
-    ):
-        conn.close()
-        sys.exit()
-
-    # ------------------------------------------------------------------------
-    # If reading from stdin
-    if args.dash:
-        msg = stdin_note()
-
-        with conn:
-            msg_uuid = data.insert_note(conn, msg)
-            if args.tags:
-                tags = flatten_tag_groups(args.tags)
-                tag_uuids = data.insert_tags(conn, tags)
-                data.insert_asscs(conn, msg_uuid, tag_uuids)
-
-        print(f"Saved as message ID {msg_uuid}")
-        conn.close()
-        sys.exit()
-
-    # ------------------------------------------------------------------------
-    # Print Note metadata (uuid, created_at, tags)
-    if args.metadata:
-        for msg in messages:
-            print(get_metadata(msg))
-        conn.close()
-        sys.exit()
-
-    # ------------------------------------------------------------------------
-    # Display notes matching filters
-    if args.tags or args.date_ranges or args.search:
-
-        # The users editor is opened here, and may be open for an extended
-        # period of time. Close the database and get a new connection
-        # afterward.
-        conn.close()
-
-        editor_view = EditorView(
-            messages, tag_groups, expanded_tag_groups, style=(not args.plain)
-        )
-
-        if args.stdout:
-            # Print to stdout and then exit
-            print("".join(editor_view.rendered))
-            sys.exit()
-
-        new_note = None
-        notifications = []
-
-        for body_lines in editor(editor_view.rendered):
-            conn = data.get_connection(str(DB_PATH))
-
-            diffs = editor_view.diff(list(body_lines), debug=DEBUG)
-            for note_orig, note_mod in diffs:
-                if note_orig is None:
-                    new_note = note_mod
-                    continue
-
-                assert note_orig.uuid == note_mod.uuid
-
-                # Begin transaction to update note
-                with conn:
-                    if note_orig.body != note_mod.body:
-                        # Update body of note
-                        data.update_msg(conn, note_mod.uuid, note_mod.body)
-
-                    if note_orig.tags != note_mod.tags:
-                        # Update associated tags
-                        tags_add = note_mod.tags - note_orig.tags
-                        if tags_add:
-                            tag_uuids = data.insert_tags(conn, tags_add)
-                            data.insert_asscs(conn, note_mod.uuid, tag_uuids)
-
-                        tags_sub = note_orig.tags - note_mod.tags
-                        if tags_sub:
-                            tag_uuids = {
-                                t[0] for t in data.select_tags(conn, tuple(tags_sub))
-                            }
-                            data.remove_asscs(conn, note_mod.uuid, tag_uuids)
-
-                notifications.append(f"Saved changes to message ID {note_mod.uuid}")
-
-            # Reset the EditorView to account for the modified notes.
-            editor_view = EditorView(
-                data.Notes(uuids=[m.uuid for m in messages]).fetch(conn),
-                tag_groups,
-                expanded_tag_groups,
-                style=(not args.plain),
-            )
-
-            conn.close()
-
-        if new_note is not None:
-            conn = data.get_connection(str(DB_PATH))
-            with conn:
-                msg_uuid = data.insert_note(conn, new_note.body)
-                tag_uuids = data.insert_tags(conn, new_note.tags)
-                data.insert_asscs(conn, msg_uuid, tag_uuids)
-
-                notifications.append(f"Saved additional message as ID {msg_uuid}")
-            conn.close()
-
-        # Messages / notification to user are deferred until the editor is
-        # closed, so that output to stdout (via print) will not interfere
-        # with terminal editors.
-        for notification in notifications:
-            print(notification)
-
-        sys.exit()
-
-    # ------------------------------------------------------------------------
-    # Quick note
-    msg = open_temp_logfile()
-    if not msg:
-        print("No message created...")
-        sys.exit()
-
-    msg_uuid = data.insert_note(conn, msg)
-    conn.commit()
-
-    # Collect tags via custom prompt
-    tag_prompt = TagPrompt(data.select_all_tags(conn))
-    tag_prompt.cmdloop()
-
-    if tag_prompt.user_tags:
-        with conn:
-            tag_uuids = data.insert_tags(conn, tag_prompt.user_tags)
-            data.insert_asscs(conn, msg_uuid, tag_uuids)
-
-    print(f"Saved as message ID {msg_uuid}")
-    conn.close()

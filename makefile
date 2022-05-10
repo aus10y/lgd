@@ -1,13 +1,14 @@
-LGD_PY = ./src/lgd.py
+LGD_SRC_DIR = ./src/app/
+LGD_PY = ./bin/lgd
 LGD = ~/.local/bin/lgd
-LGD_TESTS = ./src/test_lgd.py
+LGD_TESTS = ./src/app/test_lgd.py
 LGD_DB = ~/.lgd/logs.db
 BACKUP_NOTES = ~/.lgd/backup_notes.csv
 BACKUP_TAGS = ~/.lgd/backup_tags.csv
 COMPLETIONS = ./scripts/lgd_completion.sh
 COMPLETIONS_ETC = /etc/bash_completion.d/lgd_completion.sh
 
-.PHONY: help install uninstall update test backup
+.PHONY: help install uninstall update test backup build
 
 help:
 	@echo "Options:"
@@ -18,6 +19,7 @@ help:
 	@echo "- make update"
 	@echo "- make test"
 	@echo "- make backup"
+	@echo "- make build"
 
 install:
 	@cp ${LGD_PY} ${LGD}
@@ -36,7 +38,7 @@ uninstall-completions:
 
 ${LGD}: ${LGD_PY}
 	@cp ${LGD_PY} ${LGD}
-	@chmod +x ${LGD}
+	@# @chmod +x ${LGD}
 	@rm ~/.lgd/logs.db
 	@echo "Restoring..."
 	@lgd --note-import ${BACKUP_NOTES}
@@ -56,3 +58,13 @@ ${BACKUP_TAGS}: ${LGD_DB}
 	@lgd --tag-export ${BACKUP_TAGS}
 
 backup: ${BACKUP_NOTES} ${BACKUP_TAGS}
+
+# ${LGD_PY}: ${LGD_SRC_DIR}
+# 	@python3 -m zipapp src/app -o bin/lgd -p "/usr/bin/env python3"
+# 	@echo "Packaged lgd app"
+
+# build: ${LGD_PY}
+
+build:
+	@python3 -m zipapp src/app -o bin/lgd -p "/usr/bin/env python3"
+	@echo "Packaged lgd app"
