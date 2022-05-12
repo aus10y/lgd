@@ -12,7 +12,7 @@ import uuid
 
 from typing import List, Set, Tuple
 
-import lgd
+from context import lgd
 from lgd import data
 from lgd import exceptions
 

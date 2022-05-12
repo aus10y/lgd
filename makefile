@@ -1,7 +1,7 @@
 LGD_SRC_DIR = ./src/app/
 LGD_PY = ./bin/lgd
 LGD = ~/.local/bin/lgd
-LGD_TESTS = ./src/app/test_lgd.py
+LGD_TESTS = ./tests/test_lgd.py
 LGD_DB = ~/.lgd/logs.db
 BACKUP_NOTES = ~/.lgd/backup_notes.csv
 BACKUP_TAGS = ~/.lgd/backup_tags.csv
@@ -66,5 +66,8 @@ backup: ${BACKUP_NOTES} ${BACKUP_TAGS}
 # build: ${LGD_PY}
 
 build:
-	@python3 -m zipapp src/app -o bin/lgd -p "/usr/bin/env python3"
+	@zip bin/lgd.zip lgd/* __main__.py
+	@echo '#!/usr/bin/env python3' | cat - bin/lgd.zip > bin/lgd
+	@chmod 755 bin/lgd
+	@rm bin/lgd.zip
 	@echo "Packaged lgd app"
