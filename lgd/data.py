@@ -1,5 +1,6 @@
 import gzip
 import itertools
+import json
 import sqlite3
 import uuid
 
@@ -26,7 +27,14 @@ from lgd.exceptions import LgdException
 # -----------------------------------------------------------------------------
 # Types
 
-Note = namedtuple("Note", ("uuid", "created_at", "body", "tags"))
+_Note = namedtuple("Note", ("uuid", "created_at", "body", "tags"))
+
+
+class Note(_Note):
+    __slots__ = ()
+
+    def _asjson(self) -> str:
+        return json.dumps(self._asdict())
 
 
 class Gzip(str):
@@ -314,22 +322,6 @@ _DATE_BETWEEN_FRAGMENT = "({column} BETWEEN '{begin}' AND '{end}')"
 UPDATE_LOG = """
 UPDATE logs SET msg = ? WHERE uuid = ?
 """
-
-
-class NoteX:
-    __slots__ = ("uuid", "created_at", "body", "tags")
-
-    def __init__(self, uuid, created_at, body, tags):
-        self.uuid = uuid
-        self.created_at = created_at
-        self.body = body
-        self.tags = tags
-
-    def __str__(self) -> str:
-        return ""
-
-    def __repr__(self) -> str:
-        return ""
 
 
 T = TypeVar("T")
