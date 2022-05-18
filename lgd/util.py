@@ -20,6 +20,7 @@ from typing import (
     Callable,
     Generator,
     Iterable,
+    Iterator,
     List,
     Pattern,
     Sequence,
@@ -48,6 +49,9 @@ def user_date_components(
 ) -> Tuple[int, Union[int, None], Union[int, None]]:
     # Parse the date into separate fields.
     match = date_regex.match(date_str)
+    if match is None:
+        raise argparse.ArgumentTypeError(f"Invalid date format '{date_str}'")
+
     year, month, day = match["year"], match["month"], match["day"]
 
     if year is None or match["remainder"]:
@@ -579,7 +583,9 @@ def ui_delete_notes(
             uuid_prefix,
             tuple(
                 (n[data.ID], n[data.MSG])
-                for n in data.select_msgs_from_uuid_prefix(conn, uuid_prefix)
+                for n in data.NoteQuery.select_msgs_from_uuid_prefix(
+                    uuid_prefix
+                ).execute(conn)
             ),
         )
         for uuid_prefix in uuid_prefixes
@@ -600,7 +606,7 @@ def ui_delete_notes(
 
         for uuid_full, note_body in matches:
             if get_confirmation(uuid_prefix, uuid_full, note_body):
-                if data.delete_msg(conn, uuid_full):
+                if data.NoteQuery.delete(uuid_full).execute(conn):
                     print(f" - Deleted {uuid_full}")
                 else:
                     print(f" - Failed to delete {uuid_full}")
@@ -714,7 +720,7 @@ class EditorView:
     def _editor_footer(tags: Iterable[str]) -> Tuple[str, ...]:
         footer = (
             f'{79*"-"}\n',
-            f"# Enter new log message below\n",
+            "# Enter new log message below\n",
             f'# Tags: {", ".join(tags)}\n',
             "\n",
         )
@@ -747,7 +753,7 @@ class EditorView:
     @staticmethod
     def _enumerate_diff(
         diff_lines: Iterable[str],
-    ) -> Generator[Tuple[int, str], None, None]:
+    ) -> Iterator[Tuple[int, str]]:
         first_line = True
         line_num = 0
 
@@ -809,7 +815,7 @@ class EditorView:
 
     def diff(
         self, other: Sequence[str], debug=False
-    ) -> Generator[Tuple[Union[None, data.Note], data.Note], None, None]:
+    ) -> Iterator[Tuple[Union[None, data.Note], data.Note]]:
         line_num, diff_index = 0, 0
 
         diff = difflib.ndiff(self._lines, other)
@@ -988,7 +994,8 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
             row[data.ID] = uuid.UUID(row[data.ID])
         except ValueError as e:
             raise exceptions.CSVError(
-                "Invalid 'uuid' format; value must be string of hex digits. Curly braces, hyphens, and a URN prefix are all optional."
+                "Invalid 'uuid' format; value must be string of hex digits."
+                " Curly braces, hyphens, and a URN prefix are all optional."
             ) from e
 
         try:
@@ -1000,17 +1007,16 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
 
         tags = note.tags.split(",")
 
-        if data.msg_exists(conn, note.uuid):
+        if data.NoteQuery.msg_exists(note.uuid).execute(conn):
             # Update
-            updated += int(data.update_msg(conn, note.uuid, note.body))
+            updated += int(data.NoteQuery.update(note.uuid, note.body).execute(conn))
         else:
             # Insert
-            _ = data.insert_note(
-                conn,
+            _ = data.NoteQuery.insert(
                 note.body,
                 note_uuid=note.uuid,
                 created_at=note.created_at,
-            )
+            ).execute(conn)
             inserted += 1
 
         tag_uuids = data.insert_tags(conn, tags)

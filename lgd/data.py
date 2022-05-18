@@ -6,14 +6,17 @@ import uuid
 from collections import namedtuple
 from datetime import datetime
 from typing import (
+    Any,
     Callable,
     FrozenSet,
-    Generator,
+    Generic,
     Iterable,
+    Iterator,
     List,
     Optional,
     Set,
     Tuple,
+    TypeVar,
     Union,
 )
 
@@ -24,10 +27,6 @@ from lgd.exceptions import LgdException
 # Types
 
 Note = namedtuple("Note", ("uuid", "created_at", "body", "tags"))
-
-Tag = namedtuple("Tag", ("uuid", "value"))
-
-TagRelation = namedtuple("TagRelation", ("direct", "indirect"))
 
 
 class Gzip(str):
@@ -236,7 +235,7 @@ def split_tags(tags: Union[str, None]) -> FrozenSet[str]:
     return frozenset(t.strip() for t in tags.split(",")) if tags else frozenset()
 
 
-def rows_to_notes(rows: List[sqlite3.Row]) -> Generator[Note, None, None]:
+def rows_to_notes(rows: List[sqlite3.Row]) -> Iterator[Note]:
     return (
         Note(r["uuid"], r["created_at"], r["body"], split_tags(r["tags"])) for r in rows
     )
@@ -247,28 +246,6 @@ def rows_to_notes(rows: List[sqlite3.Row]) -> Generator[Note, None, None]:
 INSERT_LOG = """
 INSERT into logs (uuid, created_at, msg) VALUES (?, {timestamp}, ?);
 """
-
-
-def insert_note(
-    conn: sqlite3.Connection,
-    note: str,
-    note_uuid: Union[uuid.UUID, None] = None,
-    created_at: Union[datetime, None] = None,
-) -> uuid.UUID:
-    """
-    created_at is assumed to be in UTC.
-    """
-    note_uuid = uuid.uuid4() if note_uuid is None else note_uuid
-
-    if created_at is None:
-        insert = INSERT_LOG.format(timestamp="CURRENT_TIMESTAMP")
-        params = (note_uuid, Gzip(note))
-    else:
-        insert = INSERT_LOG.format(timestamp="?")
-        params = (note_uuid, created_at, Gzip(note))
-
-    _ = conn.execute(insert, params)
-    return note_uuid
 
 
 SELECT_NOTES_WHERE_TEMPL = """
@@ -334,50 +311,66 @@ _WHERE_FTS = """logs.uuid in (
 _DATE_BETWEEN_FRAGMENT = "({column} BETWEEN '{begin}' AND '{end}')"
 
 
-class Notes:
-    def __init__(
-        self,
-        uuids: Optional[List[uuid.UUID]] = None,
-        tag_groups: Optional[List[Tuple[str, ...]]] = None,
-        date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
-        text: Optional[str] = None,
-        localtime: Optional[bool] = None,
-    ):
-        self._uuids = uuids
-        self._tag_groups = tag_groups
-        self._date_ranges = date_ranges
-        self._text = text
-        self._localtime = localtime
+UPDATE_LOG = """
+UPDATE logs SET msg = ? WHERE uuid = ?
+"""
+
+
+class NoteX:
+    __slots__ = ("uuid", "created_at", "body", "tags")
+
+    def __init__(self, uuid, created_at, body, tags):
+        self.uuid = uuid
+        self.created_at = created_at
+        self.body = body
+        self.tags = tags
 
     def __str__(self) -> str:
-        return str(
-            {
-                "uuids": self._uuids,
-                "tag_groups": self._tag_groups,
-                "date_ranges": self._date_ranges,
-                "text": self._text,
-                "localtime": self._localtime,
-            }
-        )
+        return ""
 
     def __repr__(self) -> str:
-        return f"NoteSelector({str(self)})"
+        return ""
 
-    def where(
+
+T = TypeVar("T")
+
+
+class Query(Generic[T]):
+    __slots__ = ("sql", "params", "adapter")
+
+    def __init__(
         self,
-        uuids: Optional[List[uuid.UUID]] = None,
-        tag_groups: Optional[List[Tuple[str, ...]]] = None,
-        date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
-        text: Optional[str] = None,
-        localtime: Optional[bool] = None,
-    ) -> "Notes":
-        return Notes(
-            uuids=uuids if uuids is not None else self._uuids,
-            tag_groups=tag_groups if tag_groups is not None else self._tag_groups,
-            date_ranges=date_ranges if date_ranges is not None else self._date_ranges,
-            text=text if text is not None else self._text,
-            localtime=localtime if localtime is not None else self._localtime,
-        )
+        sql: str,
+        params: Iterable[Any],
+        adapter: Callable[[sqlite3.Cursor], T] = lambda x: x,
+    ):
+        """
+        adapter:  callable accepting a cursor and returning some type.
+        """
+        self.sql = sql
+        self.params = params
+        self.adapter = adapter
+
+    def __str__(self):
+        return self.sql
+
+    def __repr__(self):
+        return f"Query({self.sql})"
+
+    def execute(self, conn: sqlite3.Connection) -> T:
+        result = conn.execute(self.sql, self.params)
+        return self.adapter(result)
+
+
+class NoteQuery:
+    def __init__(self):
+        pass
+
+    def __str__(self):
+        return "TODO: __str__"
+
+    def __repr__(self):
+        return "TODO: __repr__"
 
     @staticmethod
     def _uuid_filter(uuids: Union[None, List[uuid.UUID]]) -> Tuple[str, list]:
@@ -455,17 +448,44 @@ class Notes:
 
     @staticmethod
     def _localtime_correction(localtime: Union[None, bool]) -> str:
-        datetime_modifier = ""
-        if localtime:
-            datetime_modifier = ", 'localtime'"
+        datetime_modifier = ", 'localtime'" if localtime else ""
         return datetime_modifier
 
-    def fetch(self, conn: sqlite3.Connection) -> List[Note]:
-        uuid_filter, uuid_params = self._uuid_filter(self._uuids)
-        tags_filter, tags_params = self._tag_groups_filter(self._tag_groups)
-        text_filter, text_params = self._text_filter(self._text)
-        date_filter, date_params = self._date_filter(self._date_ranges)
-        datetime_modifier = self._localtime_correction(self._localtime)
+    @classmethod
+    def insert(
+        cls,
+        note: str,
+        note_uuid: Union[uuid.UUID, None] = None,
+        created_at: Union[datetime, None] = None,
+    ) -> Query[uuid.UUID]:
+        """
+        created_at is assumed to be in UTC.
+        """
+        note_uuid = uuid.uuid4() if note_uuid is None else note_uuid
+
+        if created_at is None:
+            insert = INSERT_LOG.format(timestamp="CURRENT_TIMESTAMP")
+            params = (note_uuid, Gzip(note))
+        else:
+            insert = INSERT_LOG.format(timestamp="?")
+            params = (note_uuid, created_at, Gzip(note))
+
+        return Query(insert, params, adapter=lambda _: note_uuid)
+
+    @classmethod
+    def select(
+        cls,
+        uuids: Optional[List[uuid.UUID]] = None,
+        tag_groups: Optional[List[Tuple[str, ...]]] = None,
+        date_ranges: Optional[List[Tuple[datetime, datetime]]] = None,
+        text: Optional[str] = None,
+        localtime: Optional[bool] = None,
+    ) -> Query[Iterator[Note]]:
+        uuid_filter, uuid_params = cls._uuid_filter(uuids)
+        tags_filter, tags_params = cls._tag_groups_filter(tag_groups)
+        text_filter, text_params = cls._text_filter(text)
+        date_filter, date_params = cls._date_filter(date_ranges)
+        datetime_modifier = cls._localtime_correction(localtime)
 
         params = list(
             itertools.chain(uuid_params, tags_params, text_params, date_params)
@@ -479,41 +499,63 @@ class Notes:
             datetime_modifier=datetime_modifier,
         )
 
-        return list(rows_to_notes(conn.execute(query, params).fetchall()))
+        return Query(query, params, adapter=lambda c: rows_to_notes(c.fetchall()))
+
+    @classmethod
+    def update(cls, msg_uuid: uuid.UUID, msg: str) -> Query[bool]:
+        return Query(
+            UPDATE_LOG, (Gzip(msg), msg_uuid), adapter=lambda c: c.rowcount == 1
+        )
+
+    @classmethod
+    def delete(cls, msg_uuid: uuid.UUID) -> Query[bool]:
+        msg_delete = "DELETE FROM logs WHERE uuid = ?;"
+        return Query(msg_delete, (msg_uuid,), adapter=lambda c: c.rowcount == 1)
+
+    @classmethod
+    def msg_exists(cls, msg_uuid: uuid.UUID) -> Query[bool]:
+        sql = "SELECT uuid from logs where uuid = ?;"
+        params = (msg_uuid,)
+        return Query(sql, params, adapter=lambda c: c.fetchone() is not None)
+
+    @classmethod
+    def select_msgs_from_uuid_prefix(cls, uuid_prefix: str) -> Query:
+        uuid_prefix += "%"
+        sql = "SELECT * from logs where hex(uuid) like ?;"
+        params = (uuid_prefix,)
+        return Query(sql, params, adapter=lambda c: c.fetchall())
+
+    @classmethod
+    def associate_tags(cls, msg_uuid: uuid.UUID, tags: Iterator[str]) -> Query:
+        return Query("", [])
+
+    @classmethod
+    def disassociate_tags(cls, msg_uuid: uuid.UUID, tags: Iterator[str]) -> Query:
+        return Query("", [])
 
 
-UPDATE_LOG = """
-UPDATE logs SET msg = ? WHERE uuid = ?
-"""
+# class TagQuery:
+#     def __init__(self):
+#         pass
+
+#     @classmethod
+#     def select(cls, tag: str) -> Query[Union[sqlite3.Row, None]]:
+#         pass
+
+#     @classmethod
+#     def select_all(cls) -> Query[List[str]]:
+#         pass
+
+#     @classmethod
+#     def insert(cls, tags: Iterable[str]) -> Query[Set[uuid.UUID]]:
+#         pass
+
+#     @classmethod
+#     def delete(cls, tag: str) -> Query[bool]:
+#         pass
 
 
-def update_msg(conn: sqlite3.Connection, msg_uuid: uuid.UUID, msg: str) -> bool:
-    c = conn.execute(UPDATE_LOG, (Gzip(msg), msg_uuid))
-    return c.rowcount == 1
-
-
-def msg_exists(conn: sqlite3.Connection, msg_uuid) -> bool:
-    sql = "SELECT uuid from logs where uuid = ?;"
-    return conn.execute(sql, (msg_uuid,)).fetchone() is not None
-
-
-def select_msgs_from_uuid_prefix(
-    conn: sqlite3.Connection, uuid_prefix: str
-) -> List[sqlite3.Row]:
-    uuid_prefix += "%"
-    sql = "SELECT * from logs where hex(uuid) like ?;"
-    return conn.execute(sql, (uuid_prefix,)).fetchall()
-
-
-def delete_msg(conn: sqlite3.Connection, msg_uuid) -> bool:
-    """Delete the message with the given UUID."""
-    msg_delete = "DELETE FROM logs WHERE uuid = ?;"
-    c = conn.execute(msg_delete, (msg_uuid,))
-    if c.rowcount != 1:
-        return False
-    return True
-
-
+# -----------------------------------------------------------------------------
 # Tags
 
 

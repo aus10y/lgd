@@ -199,11 +199,13 @@ def main():
     tag_groups = [tg for tg in (args.tags or []) if tg]
     expanded_tag_groups = data.expand_tag_groups(conn, tag_groups)
 
-    messages = data.Notes(
-        tag_groups=expanded_tag_groups,
-        date_ranges=args.date_ranges,
-        text=args.search,
-    ).fetch(conn)
+    messages = list(
+        data.NoteQuery.select(
+            tag_groups=expanded_tag_groups,
+            date_ranges=args.date_ranges,
+            text=args.search,
+        ).execute(conn)
+    )
 
     notes_requested = any((tag_groups, args.date_ranges, args.search))
 
@@ -272,7 +274,7 @@ def main():
         msg = lgd.stdin_note()
 
         with conn:
-            msg_uuid = data.insert_note(conn, msg)
+            msg_uuid = data.NoteQuery.insert(msg).execute(conn)
             if args.tags:
                 tags = lgd.flatten_tag_groups(args.tags)
                 tag_uuids = data.insert_tags(conn, tags)
@@ -326,7 +328,9 @@ def main():
                 with conn:
                     if note_orig.body != note_mod.body:
                         # Update body of note
-                        data.update_msg(conn, note_mod.uuid, note_mod.body)
+                        data.NoteQuery.update(note_mod.uuid, note_mod.body).execute(
+                            conn
+                        )
 
                     if note_orig.tags != note_mod.tags:
                         # Update associated tags
@@ -346,7 +350,7 @@ def main():
 
             # Reset the EditorView to account for the modified notes.
             editor_view = lgd.EditorView(
-                data.Notes(uuids=[m.uuid for m in messages]).fetch(conn),
+                data.NoteQuery.select(uuids=[m.uuid for m in messages]).execute(conn),
                 tag_groups,
                 expanded_tag_groups,
                 style=(not args.plain),
@@ -357,7 +361,7 @@ def main():
         if new_note is not None:
             conn = data.get_connection(str(lgd.DB_PATH))
             with conn:
-                msg_uuid = data.insert_note(conn, new_note.body)
+                msg_uuid = data.NoteQuery.insert(new_note.body).execute(conn)
                 tag_uuids = data.insert_tags(conn, new_note.tags)
                 data.insert_asscs(conn, msg_uuid, tag_uuids)
 
@@ -379,7 +383,7 @@ def main():
         print("No message created...")
         sys.exit()
 
-    msg_uuid = data.insert_note(conn, msg)
+    msg_uuid = data.NoteQuery.insert(msg).execute(conn)
     conn.commit()
 
     # Collect tags via custom prompt

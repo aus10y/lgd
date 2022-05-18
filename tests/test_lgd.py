@@ -10,7 +10,7 @@ import string
 import unittest
 import uuid
 
-from typing import List, Set, Tuple
+from typing import List, Sequence, Set, Tuple
 
 from context import lgd
 from lgd import data
@@ -27,7 +27,7 @@ def tag_factory(num: int) -> List[str]:
     ]
 
 
-def tag_relation_factory(tags: str, num: int) -> Set[Tuple]:
+def tag_relation_factory(tags: Sequence[str], num: int) -> Set[Tuple]:
     return set(tuple(random.sample(tags, 2)) for _ in range(num))
 
 
@@ -102,15 +102,15 @@ class TestFlattenTagGroups(unittest.TestCase):
         self.assertEqual([], lgd.flatten_tag_groups([]))
 
     def test_empty_groups(self):
-        self.assertEqual([], lgd.flatten_tag_groups([[]]))
+        self.assertEqual([], lgd.flatten_tag_groups([()]))
 
     def test_single_group(self):
-        self.assertEqual(["a"], lgd.flatten_tag_groups([["a"]]))
-        self.assertEqual(["a", "b", "c"], lgd.flatten_tag_groups([["a", "b", "c"]]))
+        self.assertEqual(["a"], lgd.flatten_tag_groups([("a",)]))
+        self.assertEqual(["a", "b", "c"], lgd.flatten_tag_groups([("a", "b", "c")]))
 
     def test_multiple_groups(self):
         self.assertEqual(
-            ["a", "b", "c", "d"], lgd.flatten_tag_groups([["a", "b"], ["c", "d"]])
+            ["a", "b", "c", "d"], lgd.flatten_tag_groups([("a", "b"), ("c", "d")])
         )
 
 
@@ -224,10 +224,12 @@ class TestNoteInsert(unittest.TestCase):
         note_body = body_factory()
 
         # Insert a note
-        note_uuid = data.insert_note(self.conn, note_body)
+        # note_uuid = data.insert_note(self.conn, note_body)
+        note_uuid = data.NoteQuery.insert(note_body).execute(self.conn)
 
         # Show that the note may be retrieved
-        notes = data.Notes(uuids=[note_uuid]).fetch(self.conn)
+        # notes = data.Notes(uuids=[note_uuid]).fetch(self.conn)
+        notes = list(data.NoteQuery.select(uuids=[note_uuid]).execute(self.conn))
 
         self.assertEqual(len(notes), 1)
         note = notes[0]
@@ -239,11 +241,15 @@ class TestNoteInsert(unittest.TestCase):
         note_body = body_factory()
 
         # Insert a note, passing a pre-existing uuid.
-        note_uuid = data.insert_note(self.conn, note_body, note_uuid=note_uuid_orig)
+        # note_uuid = data.insert_note(self.conn, note_body, note_uuid=note_uuid_orig)
+        note_uuid = data.NoteQuery.insert(note_body, note_uuid=note_uuid_orig).execute(
+            self.conn
+        )
         self.assertEqual(note_uuid, note_uuid_orig)
 
         # Retrieve the note and show that the uuid is the same.
-        notes = data.Notes(uuids=[note_uuid]).fetch(self.conn)
+        # notes = data.Notes(uuids=[note_uuid]).fetch(self.conn)
+        notes = list(data.NoteQuery.select(uuids=[note_uuid]).execute(self.conn))
 
         self.assertEqual(len(notes), 1)
         note = notes[0]
@@ -256,10 +262,16 @@ class TestNoteInsert(unittest.TestCase):
         note_body = body_factory()
 
         # Insert a note, passing a pre-existing timestamp.
-        note_uuid = data.insert_note(self.conn, note_body, created_at=created_at_orig)
+        # note_uuid = data.insert_note(self.conn, note_body, created_at=created_at_orig)
+        note_uuid = data.NoteQuery.insert(
+            note_body, created_at=created_at_orig
+        ).execute(self.conn)
 
         # Retrieve the note and show that the created_at timestamp is the same.
-        notes = data.Notes(uuids=[note_uuid], localtime=False).fetch(self.conn)
+        # notes = data.Notes(uuids=[note_uuid], localtime=False).fetch(self.conn)
+        notes = list(
+            data.NoteQuery.select(uuids=[note_uuid], localtime=False).execute(self.conn)
+        )
 
         self.assertEqual(len(notes), 1)
         note = notes[0]
@@ -276,19 +288,25 @@ class TestNoteSelect(unittest.TestCase):
         # TODO: insert some notes
 
     def test_select_uuids(self):
-        note_uuids = [data.insert_note(self.conn, body_factory()) for _ in range(5)]
+        # note_uuids = [data.insert_note(self.conn, body_factory()) for _ in range(5)]
+        note_uuids = [
+            data.NoteQuery.insert(body_factory()).execute(self.conn) for _ in range(5)
+        ]
 
         # Select zero uuids
-        notes = data.Notes(uuids=[]).fetch(self.conn)
+        # notes = data.Notes(uuids=[]).fetch(self.conn)
+        notes = list(data.NoteQuery.select(uuids=[]).execute(self.conn))
         self.assertEqual(notes, [])
 
         # Select one uuid
-        notes = data.Notes(uuids=[note_uuids[0]]).fetch(self.conn)
+        # notes = data.Notes(uuids=[note_uuids[0]]).fetch(self.conn)
+        notes = list(data.NoteQuery.select(uuids=[note_uuids[0]]).execute(self.conn))
         self.assertEqual(len(notes), 1)
         self.assertEqual([n.uuid for n in notes], [note_uuids[0]])
 
         # Select multiple uuids
-        notes = data.Notes(uuids=note_uuids).fetch(self.conn)
+        # notes = data.Notes(uuids=note_uuids).fetch(self.conn)
+        notes = list(data.NoteQuery.select(uuids=note_uuids).execute(self.conn))
         self.assertEqual(len(notes), len(note_uuids))
         self.assertEqual({n.uuid for n in notes}, set(note_uuids))
 
@@ -379,7 +397,8 @@ class TestCSVNoteExport(unittest.TestCase):
 
     def test_note_export(self):
         # Check number of exported notes
-        notes = data.Notes(localtime=False).fetch(self.conn)
+        # notes = data.Notes(localtime=False).fetch(self.conn)
+        notes = list(data.NoteQuery.select(localtime=False).execute(self.conn))
         outfile = io.StringIO()
         num_exported = lgd.note_export(self.conn, notes, outfile)
 
@@ -387,11 +406,13 @@ class TestCSVNoteExport(unittest.TestCase):
 
     def test_note_export_equality(self):
         # Retrieve Notes inserted during setup.
-        notes1 = set(data.Notes().fetch(self.conn))
+        # notes1 = set(data.Notes().fetch(self.conn))
+        notes1 = set(data.NoteQuery.select().execute(self.conn))
         self.assertEqual(len(notes1), len(NOTES))
 
         # Export from the setUp DB.
-        notes = data.Notes(localtime=False).fetch(self.conn)
+        # notes = data.Notes(localtime=False).fetch(self.conn)
+        notes = list(data.NoteQuery.select(localtime=False).execute(self.conn))
         notefile = io.StringIO()
         _ = lgd.note_export(self.conn, notes, notefile)
         notefile.seek(0)
@@ -405,7 +426,8 @@ class TestCSVNoteExport(unittest.TestCase):
 
         # Retrieve the Notes from the 2nd DB.
         # Check that the notes retrieved from both DBs are equal.
-        notes2 = set(data.Notes().fetch(conn2))
+        # notes2 = set(data.Notes().fetch(conn2))
+        notes2 = set(data.NoteQuery.select().execute(conn2))
         self.assertEqual(notes1, notes2)
 
 
