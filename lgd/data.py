@@ -28,6 +28,7 @@ from lgd.exceptions import LgdException
 # Types
 
 _Note = namedtuple("Note", ("uuid", "created_at", "body", "tags"))
+Tag = namedtuple("Tag", ("uuid", "tag"))
 
 
 class Note(_Note):
@@ -518,96 +519,49 @@ class NoteQuery:
         return Query(sql, params, adapter=lambda c: c.fetchall())
 
     @classmethod
-    def associate_tags(cls, msg_uuid: uuid.UUID, tags: Iterator[str]) -> Query:
-        return Query("", [])
+    def add_tag(cls, msg_uuid: uuid.UUID, tag_uuid: uuid.UUID) -> Query[bool]:
+        sql = "INSERT OR IGNORE INTO logs_tags (log_uuid, tag_uuid) VALUES (?, ?);"
+        params = (msg_uuid, tag_uuid)
+        return Query(sql, params, adapter=lambda c: c.rowcount == 1)
 
     @classmethod
-    def disassociate_tags(cls, msg_uuid: uuid.UUID, tags: Iterator[str]) -> Query:
+    def remove_tag(cls, msg_uuid: uuid.UUID, tags: uuid.UUID) -> Query:
         return Query("", [])
 
 
-# class TagQuery:
-#     def __init__(self):
-#         pass
+class TagQuery:
+    @classmethod
+    def select(cls, tags: Iterable[str]) -> Query[List[sqlite3.Row]]:
+        tag_snippet = ", ".join("?" for _ in tags)
+        sql = f"SELECT * FROM tags WHERE tag in ({tag_snippet})"
+        return Query(sql, tags, adapter=lambda c: c.fetchall())
 
-#     @classmethod
-#     def select(cls, tag: str) -> Query[Union[sqlite3.Row, None]]:
-#         pass
+    @classmethod
+    def select_all(cls) -> Query[List[str]]:
+        sql = "SELECT tags.tag FROM tags;"
+        return Query(sql, (), adapter=lambda c: c.fetchall())
 
-#     @classmethod
-#     def select_all(cls) -> Query[List[str]]:
-#         pass
+    @classmethod
+    def insert(cls, tag_uuid: uuid.UUID, tag: str) -> Query[uuid.UUID]:
+        sql = "INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);"
+        return Query(sql, (tag_uuid, tag), adapter=lambda c: tag_uuid)
 
-#     @classmethod
-#     def insert(cls, tags: Iterable[str]) -> Query[Set[uuid.UUID]]:
-#         pass
+    @classmethod
+    def delete(cls, tag: str) -> Query[bool]:
+        sql = "DELETE FROM tags WHERE tag = ?;"
+        return Query(sql, (tag,), adapter=lambda c: c.rowcount == 1)
 
-#     @classmethod
-#     def delete(cls, tag: str) -> Query[bool]:
-#         pass
-
-
-# -----------------------------------------------------------------------------
-# Tags
-
-
-def delete_tag(conn: sqlite3.Connection, tag: str) -> bool:
-    """Delete the tag with the given value.
-
-    propagate: If `True` (default), delete the associates to logs,
-        but not the logs themselves.
-    """
-    # Find the id of the tag.
-    tag_select = "SELECT uuid FROM tags WHERE tag = ?;"
-    c = conn.execute(tag_select, (tag,))
-    result = c.fetchone()
-    if not result:
-        return False
-    tag_uuid = result[0]
-
-    # Delete the tag.
-    tag_delete = "DELETE FROM tags WHERE uuid = ?;"
-    c = conn.execute(tag_delete, (tag_uuid,))
-    if c.rowcount != 1:
-        return False
-    return True
-
-
-def select_tag(conn: sqlite3.Connection, tag: str) -> Union[sqlite3.Row, None]:
-    result = select_tags(conn, [tag])
-    return result[0] if result else None
-
-
-def select_tags(
-    conn: sqlite3.Connection, tags: Union[List[str], Tuple[str, ...]]
-) -> List[sqlite3.Row]:
-    tag_snippet = ", ".join("?" for _ in tags)
-    sql = f"SELECT * FROM tags WHERE tag in ({tag_snippet})"
-    c = conn.execute(sql, tags)
-    return c.fetchall()
-
-
-INSERT_TAG = """
-INSERT OR IGNORE INTO tags (uuid, tag) VALUES (?, ?);
-"""
-
-
-def insert_tags(conn: sqlite3.Connection, tags: Iterable[str]) -> Set[uuid.UUID]:
-    tag_uuids = set()
-    for tag in tags:
-        result = select_tag(conn, tag)
-        if result is None:
-            tag_uuid = uuid.uuid4()
-            _ = conn.execute(INSERT_TAG, (tag_uuid, tag))
-        else:
-            tag_uuid, _ = result
-        tag_uuids.add(tag_uuid)
-    return tag_uuids
-
-
-def select_all_tags(conn: sqlite3.Connection) -> List[str]:
-    c = conn.execute("SELECT tags.tag FROM tags;")
-    return [r[0] for r in c.fetchall()]
+    @classmethod
+    def insert_tags(
+        cls, conn: sqlite3.Connection, tags: Iterable[str]
+    ) -> Set[uuid.UUID]:
+        results = cls.select(tags).execute(conn)
+        existing_tags = {t[TAG] for t in results}
+        tag_uuids = {t[ID] for t in results}
+        for tag in tags:
+            if tag not in existing_tags:
+                tag_uuids.add(cls.insert(uuid.uuid4(), tag).execute(conn))
+        return tag_uuids
 
 
 # Log-Tag associations
@@ -654,18 +608,18 @@ INSERT INTO tag_relations (tag_uuid, tag_uuid_denoted) VALUES (?, ?);
 def insert_tag_relation(
     conn: sqlite3.Connection, explicit: str, implicit: str, quiet=False
 ):
-    tags = select_tags(conn, (explicit, implicit))
+    tags = TagQuery.select((explicit, implicit)).execute(conn)
     tags = {t[TAG]: t[ID] for t in tags}
 
     if explicit not in tags:
-        explicit_uuid = insert_tags(conn, (explicit,)).pop()
+        explicit_uuid = TagQuery.insert_tags(conn, (explicit,)).pop()
         if not quiet:
             print(f"- Inserted '{explicit}' tag'")
     else:
         explicit_uuid = tags[explicit]
 
     if implicit not in tags:
-        implicit_uuid = insert_tags(conn, (implicit,)).pop()
+        implicit_uuid = TagQuery.insert_tags(conn, (implicit,)).pop()
         if not quiet:
             print(f"- Inserted '{implicit}' tag'")
     else:
@@ -682,7 +636,7 @@ DELETE from tag_relations WHERE tag_uuid = ? AND tag_uuid_denoted = ?;
 
 
 def remove_tag_relation(conn: sqlite3.Connection, explicit: str, implicit: str) -> bool:
-    tags = select_tags(conn, (explicit, implicit))
+    tags = TagQuery.select((explicit, implicit)).execute(conn)
     tags = {t[TAG]: t[ID] for t in tags}
 
     if explicit not in tags:

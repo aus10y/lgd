@@ -1019,7 +1019,8 @@ def note_import(conn: sqlite3.Connection, infile: io.TextIOWrapper) -> Tuple[int
             ).execute(conn)
             inserted += 1
 
-        tag_uuids = data.insert_tags(conn, tags)
+        # tag_uuids = data.insert_tags(conn, tags)
+        tag_uuids = data.TagQuery.insert_tags(conn, tags)
         data.insert_asscs(conn, note.uuid, tag_uuids)
 
     return (inserted, updated)
